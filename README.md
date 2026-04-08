@@ -249,22 +249,7 @@ The right-hand reference pane can show:
 - It warns about unsaved changes
 - It does not use `server\campaigns` as a live source
 - It keeps template data read-only inside the UI
-
-## Suggested GitHub Repo Structure
-
-```text
-Kenshi-Prompt-Explorer/
-  KenshiPromptExplorer.ps1
-  README.md
-```
-
-## Roadmap Ideas
-
-- better inline field validation
-- rename/move helpers for entries and categories
-- diff view before save
-- export/import helpers for campaign packs
-- richer AI generation presets by entry type
+- There may be bugs
 
 ## Disclaimer
 

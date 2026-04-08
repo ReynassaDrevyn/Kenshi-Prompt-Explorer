@@ -426,18 +426,33 @@ function Parse-EntityDocument {
 }
 
 function Get-EntityGroupName {
-    param([Parameter(Mandatory)][string]$FieldName)
+    param(
+        [Parameter(Mandatory)][string]$FieldName,
+        $Document
+    )
 
     $key = Normalize-FieldKey -FieldName $FieldName
     if ($key -in @('persistent_id', 'runtime_id')) { return 'ids' }
-    if ($key -in @('display_name', 'original_name', 'race', 'sex', 'faction', 'origin_faction', 'location', 'role', 'job', 'weight', 'relation', 'price_modifier')) { return 'structural' }
+
+    $isProse = $false
+    if ($Document -and $Document.FieldMeta -and $Document.FieldMeta.ContainsKey($key)) {
+        $isProse = [bool]$Document.FieldMeta[$key].IsProse
+    }
+    elseif ($key -in @('knows_about', 'loyalty', 'religion', 'outlook', 'motivation', 'personality', 'backstory', 'speech_quirks')) {
+        $isProse = $true
+    }
+
+    if (-not $isProse) { return 'structural' }
     if ($key -in @('knows_about', 'loyalty', 'religion', 'outlook', 'motivation')) { return 'knowledge' }
     if ($key -in @('personality', 'backstory', 'speech_quirks')) { return 'prose' }
     return 'custom'
 }
 
 function Get-FieldPriority {
-    param([Parameter(Mandatory)][string]$FieldName)
+    param(
+        [Parameter(Mandatory)][string]$FieldName,
+        $Document
+    )
 
     $priority = @{
         persistent_id  = 100
@@ -469,7 +484,13 @@ function Get-FieldPriority {
         return $priority[$normalized]
     }
 
-    return 1000
+    switch (Get-EntityGroupName -FieldName $normalized -Document $Document) {
+        'structural' { return 350 }
+        'knowledge' { return 500 }
+        'prose' { return 600 }
+        'custom' { return 800 }
+        default { return 1000 }
+    }
 }
 
 function Get-SortedEntityFieldNames {
@@ -481,7 +502,7 @@ function Get-SortedEntityFieldNames {
     }
 
     return @($Document.Fields.Keys | Sort-Object `
-            @{ Expression = { Get-FieldPriority -FieldName $_ } }, `
+            @{ Expression = { Get-FieldPriority -FieldName $_ -Document $Document } }, `
             @{ Expression = { if ($layoutLookup.ContainsKey($_)) { $layoutLookup[$_] } else { 9999 } } }, `
             @{ Expression = { $_ } })
 }
@@ -504,11 +525,7 @@ function Render-EntityDocument {
 
     foreach ($key in $sortedKeys) {
         $value = [string]$Document.Fields[$key]
-        if (-not $value.Trim()) {
-            continue
-        }
-
-        $group = Get-EntityGroupName -FieldName $key
+        $group = Get-EntityGroupName -FieldName $key -Document $Document
         if ($previousGroup -and $group -ne $previousGroup) {
             $lines.Add('')
         }
@@ -541,7 +558,15 @@ function New-EntityDocumentFromTemplate {
         foreach ($key in $TemplateDocument.LayoutOrder) {
             if (-not $fields.Contains($key)) {
                 $fields[$key] = ''
-                $meta[$key] = $TemplateDocument.FieldMeta[$key]
+                if ($TemplateDocument.FieldMeta.ContainsKey($key)) {
+                    $meta[$key] = $TemplateDocument.FieldMeta[$key]
+                }
+                else {
+                    $meta[$key] = [pscustomobject]@{
+                        OriginalKey = $key
+                        IsProse     = $false
+                    }
+                }
                 $layoutOrder.Add($key)
             }
         }
@@ -564,9 +589,6 @@ function New-EntityDocumentFromTemplate {
     }
 
     $fields['display_name'] = $DisplayName
-    if ($fields.Contains('weight') -and -not $fields['weight']) {
-        $fields['weight'] = '5'
-    }
 
     [pscustomobject]@{
         Header                 = [ordered]@{ Category = $Category; Name = $FolderName; Id = $EntryId }
@@ -578,6 +600,30 @@ function New-EntityDocumentFromTemplate {
         CanRoundTripStructured = $true
     }
 }
+
+function Get-EntityDocumentsFromRoot {
+    param([string]$RootPath)
+
+    $documents = [System.Collections.Generic.List[object]]::new()
+    if (-not $RootPath -or -not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return @($documents)
+    }
+
+    foreach ($dir in @(Get-ChildItem -LiteralPath $RootPath -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+        $entityPath = Join-Path $dir.FullName 'entity.txt'
+        if (-not (Test-Path -LiteralPath $entityPath -PathType Leaf)) {
+            continue
+        }
+
+        $document = Parse-EntityDocument -Content ([System.IO.File]::ReadAllText($entityPath))
+        if ($document -and $document.CanRoundTripStructured) {
+            $documents.Add($document)
+        }
+    }
+
+    return @($documents)
+}
+
 
 function ConvertTo-Slug {
     param([Parameter(Mandatory)][string]$Text)
@@ -737,13 +783,124 @@ function Add-ContentTreeChildren {
                 DisplayName  = $dir.Name
                 Path         = $dir.FullName
                 RelativePath = $dir.FullName.Substring($BasePath.Length).TrimStart('\')
-            }) -Expand
+            })
 
         Add-ContentTreeChildren -RootPath $dir.FullName -BasePath $BasePath -TargetCollection $item.Items -Search $Search
         $folderMatches = (Test-SearchMatch -Search $Search -Text $dir.Name) -or (Test-SearchMatch -Search $Search -Text $item.Tag.RelativePath)
         if ($item.Items.Count -gt 0 -or $folderMatches -or -not $Search) {
             $TargetCollection.Add($item) | Out-Null
         }
+    }
+}
+
+function Get-TreeNodeRelativePath {
+    param($Item)
+
+    if (-not $Item) {
+        return ''
+    }
+
+    $tag = if ($Item.PSObject.Properties['Tag']) { $Item.Tag } else { $Item }
+    if ($tag -and $tag.PSObject.Properties['RelativePath'] -and $tag.RelativePath) {
+        return [string]$tag.RelativePath
+    }
+
+    return ''
+}
+
+function Get-ExpandedTreeNodeKeys {
+    $keys = [System.Collections.Generic.List[string]]::new()
+
+    function Add-ExpandedKeysFromItems {
+        param($Items, $ExpandedKeys)
+
+        foreach ($item in @($Items)) {
+            if ($item -isnot [System.Windows.Controls.TreeViewItem]) {
+                continue
+            }
+
+            $key = Get-TreeNodeRelativePath -Item $item
+            if ($item.IsExpanded -and $key) {
+                $ExpandedKeys.Add($key) | Out-Null
+            }
+
+            if ($item.Items.Count -gt 0) {
+                Add-ExpandedKeysFromItems -Items $item.Items -ExpandedKeys $ExpandedKeys
+            }
+        }
+    }
+
+    Add-ExpandedKeysFromItems -Items $Controls.PromptTree.Items -ExpandedKeys $keys
+    return @($keys)
+}
+
+function Find-TreeViewItemByRelativePath {
+    param(
+        [Parameter(Mandatory)]$Items,
+        [Parameter(Mandatory)][string]$RelativePath
+    )
+
+    foreach ($item in @($Items)) {
+        if ($item -isnot [System.Windows.Controls.TreeViewItem]) {
+            continue
+        }
+
+        if ((Get-TreeNodeRelativePath -Item $item).Equals($RelativePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $item
+        }
+
+        $match = Find-TreeViewItemByRelativePath -Items $item.Items -RelativePath $RelativePath
+        if ($match) {
+            return $match
+        }
+    }
+
+    return $null
+}
+
+function Expand-TreeViewToRelativePath {
+    param(
+        [Parameter(Mandatory)]$Items,
+        [Parameter(Mandatory)][string]$RelativePath
+    )
+
+    foreach ($item in @($Items)) {
+        if ($item -isnot [System.Windows.Controls.TreeViewItem]) {
+            continue
+        }
+
+        $itemPath = Get-TreeNodeRelativePath -Item $item
+        if ($itemPath -and $itemPath.Equals($RelativePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+
+        if ($item.Items.Count -gt 0) {
+            $found = Expand-TreeViewToRelativePath -Items $item.Items -RelativePath $RelativePath
+            if ($found) {
+                $item.IsExpanded = $true
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Restore-ExpandedTreeNodeKeys {
+    param(
+        [string[]]$ExpandedKeys,
+        [string]$RevealRelativePath
+    )
+
+    foreach ($key in @($ExpandedKeys | Where-Object { $_ } | Select-Object -Unique)) {
+        $item = Find-TreeViewItemByRelativePath -Items $Controls.PromptTree.Items -RelativePath $key
+        if ($item) {
+            $item.IsExpanded = $true
+        }
+    }
+
+    if ($RevealRelativePath) {
+        [void](Expand-TreeViewToRelativePath -Items $Controls.PromptTree.Items -RelativePath $RevealRelativePath)
     }
 }
 
@@ -840,6 +997,32 @@ function Get-ReferenceTextForDocument {
     }
 
     return ''
+}
+
+function Get-FirstEntityDocumentFromRoot {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return $null
+    }
+
+    $candidate = Get-ChildItem -LiteralPath $RootPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'entity.txt') -PathType Leaf } |
+        Sort-Object Name |
+        Select-Object -First 1
+
+    if (-not $candidate) {
+        $candidate = Get-ChildItem -LiteralPath $RootPath -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'entity.txt') -PathType Leaf } |
+            Sort-Object FullName |
+            Select-Object -First 1
+    }
+
+    if ($candidate) {
+        return (Parse-EntityDocument -Content ([System.IO.File]::ReadAllText((Join-Path $candidate.FullName 'entity.txt'))))
+    }
+
+    return $null
 }
 
 function Get-CurrentModelDescriptor {
@@ -1399,7 +1582,10 @@ if ($SelfTest) {
         </WrapPanel>
 
         <WrapPanel Grid.Row="1" Grid.Column="1" HorizontalAlignment="Right">
+          <TextBlock x:Name="NewCategoryLabel" Text="New In" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <ComboBox x:Name="NewCategoryCombo" Width="180" Margin="0,0,10,0"/>
           <Button x:Name="NewButton" Content="New" Height="36"/>
+          <Button x:Name="DeleteButton" Content="Delete" Height="36"/>
           <Button x:Name="SaveButton" Content="Save" Height="36"/>
           <Button x:Name="SaveAsButton" Content="Save As" Height="36"/>
           <Button x:Name="GenerateButton" Content="Generate Draft" Height="36" Margin="12,0,8,0"/>
@@ -1416,7 +1602,17 @@ if ($SelfTest) {
       </Grid.ColumnDefinitions>
 
       <Border Grid.Column="0" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="14" Padding="10" Margin="0,0,12,0">
-        <TreeView x:Name="PromptTree"/>
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <WrapPanel Margin="0,0,0,10">
+            <Button x:Name="ExpandAllButton" Content="Expand All" Height="32" Style="{StaticResource AccentButton}"/>
+            <Button x:Name="CollapseAllButton" Content="Collapse All" Height="32" Margin="0"/>
+          </WrapPanel>
+          <TreeView x:Name="PromptTree" Grid.Row="1"/>
+        </Grid>
       </Border>
 
       <Border Grid.Column="1" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="14" Padding="12" Margin="0,0,12,0">
@@ -1490,7 +1686,9 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 $Controls = @{}
 foreach ($name in @(
         'RootPathBox', 'OpenFolderButton', 'ImportZipButton', 'CampaignCombo', 'ModeCombo', 'ProviderCombo', 'ModelCombo', 'SearchBox',
-        'NewButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
+        'NewCategoryLabel', 'NewCategoryCombo',
+        'ExpandAllButton', 'CollapseAllButton',
+        'NewButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
         'EditorHeaderText', 'MandatoryEditor', 'StructuredEditorScroll', 'StructuredEditorPanel', 'RawEntityEditor',
         'EmptyStateText', 'MetadataText', 'PreviewTextBox', 'ReferenceTextBox', 'TemplateReferenceCheckBox',
         'AiInstructionsBox', 'AiDraftTextBox', 'StatusText'
@@ -1606,12 +1804,30 @@ function Show-EmptyEditor {
     $Controls.MetadataText.Text = ''
 }
 
+function Set-TreeExpansionState {
+    param(
+        [Parameter(Mandatory)]$Items,
+        [Parameter(Mandatory)][bool]$Expanded
+    )
+
+    foreach ($item in @($Items)) {
+        if ($item -is [System.Windows.Controls.TreeViewItem]) {
+            $item.IsExpanded = $Expanded
+            if ($item.Items.Count -gt 0) {
+                Set-TreeExpansionState -Items $item.Items -Expanded:$Expanded
+            }
+        }
+    }
+}
+
 function Add-StructuredTextBox {
     param(
         [Parameter(Mandatory)][System.Windows.Controls.Panel]$Panel,
         [Parameter(Mandatory)][string]$Label,
-        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
         [Parameter(Mandatory)]$BindingInfo,
+        $DeleteBindingInfo,
+        [switch]$CanDelete,
         [switch]$MultiLine
     )
 
@@ -1621,6 +1837,10 @@ function Add-StructuredTextBox {
     $row.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
     $row.ColumnDefinitions[0].Width = '160'
     $row.ColumnDefinitions[1].Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    if ($CanDelete) {
+        $row.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
+        $row.ColumnDefinitions[2].Width = [System.Windows.GridLength]::Auto
+    }
 
     $labelBlock = [System.Windows.Controls.TextBlock]::new()
     $labelBlock.Text = $Label
@@ -1659,6 +1879,34 @@ function Add-StructuredTextBox {
 
     $row.Children.Add($labelBlock) | Out-Null
     $row.Children.Add($textBox) | Out-Null
+    if ($CanDelete) {
+        $deleteButton = [System.Windows.Controls.Button]::new()
+        $deleteButton.Content = 'Delete'
+        $deleteButton.Margin = '8,0,0,0'
+        $deleteButton.Tag = $DeleteBindingInfo
+        [System.Windows.Controls.Grid]::SetColumn($deleteButton, 2)
+        $deleteButton.Add_Click({
+            $binding = $this.Tag
+            if (-not $binding -or -not $binding.Document -or -not $binding.FieldName) {
+                return
+            }
+
+            $result = Show-Message -Message ("Delete custom field '{0}'?" -f $binding.FieldName) -Buttons YesNo -Icon Warning
+            if ($result -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+
+            [void]$binding.Document.Fields.Remove($binding.FieldName)
+            if ($binding.Document.FieldMeta.Contains($binding.FieldName)) {
+                [void]$binding.Document.FieldMeta.Remove($binding.FieldName)
+            }
+            $binding.Document.LayoutOrder = @($binding.Document.LayoutOrder | Where-Object { $_ -ne $binding.FieldName })
+            Set-Dirty -Value $true
+            Render-StructuredEditor
+            Update-PreviewAndReference
+        })
+        $row.Children.Add($deleteButton) | Out-Null
+    }
     $Panel.Children.Add($row) | Out-Null
 }
 
@@ -1695,7 +1943,7 @@ function Render-StructuredEditor {
     }
 
     foreach ($key in (Get-SortedEntityFieldNames -Document $document)) {
-        switch (Get-EntityGroupName -FieldName $key) {
+        switch (Get-EntityGroupName -FieldName $key -Document $document) {
             'ids' { $groups['Identifiers'] += $key; continue }
             'structural' { $groups['Structural'] += $key; continue }
             'knowledge' { $groups['Knowledge / Traits'] += $key; continue }
@@ -1716,20 +1964,31 @@ function Render-StructuredEditor {
         $groupBox.Content = $groupPanel
 
         foreach ($key in $groupKeys) {
-            $isMultiLine = (Get-EntityGroupName -FieldName $key) -in @('knowledge', 'prose', 'custom')
+            $isMultiLine = (Get-EntityGroupName -FieldName $key -Document $document) -in @('knowledge', 'prose', 'custom')
             $capturedKey = [string]$key
-            Add-StructuredTextBox -Panel $groupPanel -Label $capturedKey -Value ([string]$document.Fields[$capturedKey]) -MultiLine:$isMultiLine -BindingInfo ([pscustomobject]@{
-                    Document  = $document
-                    Scope     = 'Field'
-                    FieldName = $capturedKey
-                })
+            $bindingInfo = [pscustomobject]@{
+                Document  = $document
+                Scope     = 'Field'
+                FieldName = $capturedKey
+            }
+            $canDelete = ($groupName -eq 'Custom')
+            Add-StructuredTextBox -Panel $groupPanel -Label $capturedKey -Value ([string]$document.Fields[$capturedKey]) -MultiLine:$isMultiLine -BindingInfo $bindingInfo -CanDelete:$canDelete -DeleteBindingInfo $bindingInfo
         }
 
         if ($groupName -eq 'Custom') {
             $addButton = [System.Windows.Controls.Button]::new()
             $addButton.Content = 'Add Custom Field'
             $addButton.Margin = '0,6,0,0'
+            $addButton.Tag = [pscustomobject]@{
+                Document = $document
+            }
             $addButton.Add_Click({
+                $binding = $this.Tag
+                if (-not $binding -or -not $binding.Document) {
+                    return
+                }
+
+                $document = $binding.Document
                 $name = Show-TextEntryDialog -Title 'New Custom Field' -Prompt 'Enter the new custom field name.' -DefaultValue 'note'
                 if (-not $name) {
                     return
@@ -1832,9 +2091,21 @@ function Open-TreeNode {
             Show-EmptyEditor
         }
     }
+
+    Populate-NewCategoryCombo
 }
 
 function Refresh-Tree {
+    param(
+        [switch]$PreserveState,
+        [string]$RevealRelativePath
+    )
+
+    $expandedKeys = @()
+    if ($PreserveState) {
+        $expandedKeys = @(Get-ExpandedTreeNodeKeys)
+    }
+
     $Controls.PromptTree.Items.Clear()
     if (-not $script:State.ModContext -or -not $script:State.CurrentCampaign) {
         return
@@ -1852,6 +2123,12 @@ function Refresh-Tree {
     else {
         Add-ContentTreeChildren -RootPath $root -BasePath $root -TargetCollection $Controls.PromptTree.Items -Search $search
     }
+
+    if ($PreserveState -or $RevealRelativePath) {
+        Restore-ExpandedTreeNodeKeys -ExpandedKeys $expandedKeys -RevealRelativePath $RevealRelativePath
+    }
+
+    Populate-NewCategoryCombo
 }
 
 function Populate-Combos {
@@ -1898,6 +2175,8 @@ function Populate-Combos {
         elseif ($Controls.ModelCombo.Items.Count -gt 0) {
             $Controls.ModelCombo.SelectedIndex = 0
         }
+
+        Populate-NewCategoryCombo
     }
     finally {
         $script:State.SuspendUiEvents = $false
@@ -1958,6 +2237,96 @@ function Get-CurrentContentCategoryRoot {
     return $modeRoot
 }
 
+function Get-SelectedTopLevelCategoryName {
+    $selected = Get-SelectedTreeNodeData
+    if (-not $selected -or -not $selected.RelativePath) {
+        return ''
+    }
+
+    return (($selected.RelativePath -split '\\')[0])
+}
+
+function Populate-NewCategoryCombo {
+    $script:State.SuspendUiEvents = $true
+    try {
+        $Controls.NewCategoryCombo.Items.Clear()
+
+        if (-not $script:State.ModContext) {
+            $Controls.NewCategoryCombo.IsEnabled = $false
+            $Controls.NewCategoryLabel.Visibility = 'Collapsed'
+            $Controls.NewCategoryCombo.Visibility = 'Collapsed'
+            return
+        }
+
+        $isContentMode = ($script:State.CurrentMode -eq 'Content Prompts')
+        $visibility = if ($isContentMode) { 'Visible' } else { 'Collapsed' }
+        $Controls.NewCategoryLabel.Visibility = $visibility
+        $Controls.NewCategoryCombo.Visibility = $visibility
+        $Controls.NewCategoryCombo.IsEnabled = $isContentMode
+        if (-not $isContentMode) {
+            return
+        }
+
+        $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
+        foreach ($dir in @(Get-ChildItem -LiteralPath $modeRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            [void]$Controls.NewCategoryCombo.Items.Add($dir.Name)
+        }
+
+        $preferred = Get-SelectedTopLevelCategoryName
+        if (-not $preferred -and $script:State.CurrentDocument -and $script:State.CurrentDocument.Entity -and $script:State.CurrentDocument.Entity.Header.Contains('Category')) {
+            $preferred = [string]$script:State.CurrentDocument.Entity.Header['Category']
+        }
+
+        if ($preferred -and $Controls.NewCategoryCombo.Items.Contains($preferred)) {
+            $Controls.NewCategoryCombo.SelectedItem = $preferred
+        }
+        elseif ($Controls.NewCategoryCombo.Items.Count -gt 0) {
+            $Controls.NewCategoryCombo.SelectedIndex = 0
+        }
+    }
+    finally {
+        $script:State.SuspendUiEvents = $false
+    }
+}
+
+function Get-ContentCreationTarget {
+    $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
+    $selectedRoot = Get-CurrentContentCategoryRoot
+    if ($selectedRoot -and (Test-Path -LiteralPath $selectedRoot -PathType Container)) {
+        $relative = $selectedRoot.Substring($modeRoot.Length).TrimStart('\')
+        if ($relative -and $relative.Contains('\')) {
+            return [pscustomobject]@{
+                RootPath     = $selectedRoot
+                CategoryName = (($relative -split '\\')[0])
+                IsCustomRoot = $true
+            }
+        }
+    }
+
+    $categoryName = if ($Controls.NewCategoryCombo.SelectedItem) { [string]$Controls.NewCategoryCombo.SelectedItem } else { '' }
+    if ($categoryName) {
+        $categoryRoot = Join-Path $modeRoot $categoryName
+        if (Test-Path -LiteralPath $categoryRoot -PathType Container) {
+            return [pscustomobject]@{
+                RootPath     = $categoryRoot
+                CategoryName = $categoryName
+                IsCustomRoot = $false
+            }
+        }
+    }
+
+    if ($selectedRoot -and (Test-Path -LiteralPath $selectedRoot -PathType Container)) {
+        $relative = $selectedRoot.Substring($modeRoot.Length).TrimStart('\')
+        return [pscustomobject]@{
+            RootPath     = $selectedRoot
+            CategoryName = (($relative -split '\\')[0])
+            IsCustomRoot = ($relative -and $relative.Contains('\'))
+        }
+    }
+
+    return $null
+}
+
 function Get-CurrentMandatoryTargetFolder {
     $selected = Get-SelectedTreeNodeData
     $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Gameplay Prompts'
@@ -1989,29 +2358,54 @@ function Get-SiblingTemplateDocument {
         [Parameter(Mandatory)][string]$TemplateModeRoot
     )
 
-    $candidate = Get-ChildItem -LiteralPath $CategoryRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'entity.txt') -PathType Leaf } |
-        Sort-Object Name |
-        Select-Object -First 1
-
-    if ($candidate) {
-        return (Parse-EntityDocument -Content ([System.IO.File]::ReadAllText((Join-Path $candidate.FullName 'entity.txt'))))
-    }
-
     $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
     $relative = $CategoryRoot.Substring($modeRoot.Length).TrimStart('\')
     $templateCategory = Join-Path $TemplateModeRoot $relative
-    if (Test-Path -LiteralPath $templateCategory -PathType Container) {
-        $templateCandidate = Get-ChildItem -LiteralPath $templateCategory -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'entity.txt') -PathType Leaf } |
-            Sort-Object Name |
-            Select-Object -First 1
-        if ($templateCandidate) {
-            return (Parse-EntityDocument -Content ([System.IO.File]::ReadAllText((Join-Path $templateCandidate.FullName 'entity.txt'))))
-        }
+    $templateDocument = Get-FirstEntityDocumentFromRoot -RootPath $templateCategory
+    $campaignDocument = Get-FirstEntityDocumentFromRoot -RootPath $CategoryRoot
+    if ($templateDocument) {
+        return $templateDocument
     }
 
-    return $null
+    return $campaignDocument
+}
+
+function Delete-CurrentDocument {
+    if (-not $script:State.CurrentDocument -or -not $script:State.ModContext) {
+        return
+    }
+
+    $doc = $script:State.CurrentDocument
+    switch ($doc.Type) {
+        'Mandatory' {
+            $targetPath = $doc.Path
+            Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetPath
+            $result = Show-Message -Message ("Delete prompt file '{0}'?" -f $doc.RelativePath) -Buttons YesNo -Icon Warning
+            if ($result -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+            [System.IO.File]::Delete($targetPath)
+            $script:State.CurrentDocument = $null
+            Show-EmptyEditor
+            Refresh-Tree -PreserveState
+            Set-Dirty -Value $false
+            Set-Status -Text "Deleted: $targetPath"
+        }
+        { $_ -in @('EntityRaw', 'EntityStructured') } {
+            $targetFolder = Split-Path -Path $doc.Path -Parent
+            Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetFolder
+            $result = Show-Message -Message ("Delete entry '{0}'?" -f $doc.RelativePath) -Buttons YesNo -Icon Warning
+            if ($result -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+            Remove-Item -LiteralPath $targetFolder -Recurse -Force
+            $script:State.CurrentDocument = $null
+            Show-EmptyEditor
+            Refresh-Tree -PreserveState
+            Set-Dirty -Value $false
+            Set-Status -Text "Deleted: $targetFolder"
+        }
+    }
 }
 
 function Save-CurrentDocument {
@@ -2069,7 +2463,7 @@ function Save-CurrentDocument {
     Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $profile
 
     if ($SaveAs) {
-        Refresh-Tree
+        Refresh-Tree -PreserveState
     }
 
     $doc.Path = $targetPath
@@ -2105,7 +2499,7 @@ function New-Document {
         $sibling = Get-ChildItem -LiteralPath $targetFolder -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
         $profile = if ($sibling) { Read-TextFileDetailed -Path $sibling.FullName } else { [pscustomobject]@{ Content = ''; NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
         Write-TextFileDetailed -Path $targetPath -Content '' -FileProfile $profile
-        Refresh-Tree
+        Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring((Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Gameplay Prompts').Length).TrimStart('\'))
         Open-TreeNode -Node ([pscustomobject]@{
             Kind         = 'MandatoryFile'
             Path         = $targetPath
@@ -2115,15 +2509,15 @@ function New-Document {
         Set-Status -Text "Created new prompt file: $targetPath"
     }
     else {
-        $categoryRoot = Get-CurrentContentCategoryRoot
-        if (-not (Test-Path -LiteralPath $categoryRoot -PathType Container)) {
-            Show-Message -Message 'Select a category folder or entity first.' -Icon Warning | Out-Null
+        $creationTarget = Get-ContentCreationTarget
+        if (-not $creationTarget -or -not (Test-Path -LiteralPath $creationTarget.RootPath -PathType Container)) {
+            Show-Message -Message 'Choose a category to create the new entry in.' -Icon Warning | Out-Null
             return
         }
 
         $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
-        $relative = $categoryRoot.Substring($modeRoot.Length).TrimStart('\')
-        $category = ($relative -split '\\')[0]
+        $categoryRoot = $creationTarget.RootPath
+        $category = $creationTarget.CategoryName
         if (-not $category) {
             Show-Message -Message 'Select a concrete category folder inside categories.' -Icon Warning | Out-Null
             return
@@ -2144,12 +2538,39 @@ function New-Document {
         $targetPath = Join-Path $targetFolder 'entity.txt'
 
         $templateRoot = Get-TemplateModeRootPath -Context $script:State.ModContext -Mode 'Content Prompts'
-        $templateDocument = Get-SiblingTemplateDocument -CategoryRoot $categoryRoot -TemplateModeRoot $templateRoot
-        $newEntity = New-EntityDocumentFromTemplate -Category $category -FolderName $dialog.FolderName -DisplayName $dialog.DisplayName -EntryId $dialog.EntryId -TemplateDocument $templateDocument
+        $builtinCategoryRoot = Join-Path $modeRoot $category
+        $templateCategoryRoot = Join-Path $templateRoot $category
+        $prototypeDocument = if ($creationTarget.IsCustomRoot) {
+            $customPrototype = Get-FirstEntityDocumentFromRoot -RootPath $categoryRoot
+            if ($customPrototype) {
+                $customPrototype
+            }
+            elseif (Test-Path -LiteralPath $templateCategoryRoot -PathType Container) {
+                Get-FirstEntityDocumentFromRoot -RootPath $templateCategoryRoot
+            }
+            else {
+                Get-FirstEntityDocumentFromRoot -RootPath $builtinCategoryRoot
+            }
+        }
+        else {
+            $templatePrototype = if (Test-Path -LiteralPath $templateCategoryRoot -PathType Container) {
+                Get-FirstEntityDocumentFromRoot -RootPath $templateCategoryRoot
+            }
+            else {
+                $null
+            }
+            if ($templatePrototype) {
+                $templatePrototype
+            }
+            else {
+                Get-FirstEntityDocumentFromRoot -RootPath $builtinCategoryRoot
+            }
+        }
+        $newEntity = New-EntityDocumentFromTemplate -Category $category -FolderName $dialog.FolderName -DisplayName $dialog.DisplayName -EntryId $dialog.EntryId -TemplateDocument $prototypeDocument
         $content = Render-EntityDocument -Document $newEntity
         $profile = [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false }
         Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $profile
-        Refresh-Tree
+        Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
         Open-TreeNode -Node ([pscustomobject]@{
             Kind         = 'EntityFile'
             DisplayName  = $dialog.FolderName
@@ -2380,7 +2801,7 @@ $Controls.SearchBox.Add_TextChanged({
     }
     Invoke-UiAction -Context 'Search refresh' -Action {
         if ($script:State.ModContext) {
-            Refresh-Tree
+            Refresh-Tree -PreserveState
         }
     }
 })
@@ -2426,6 +2847,12 @@ $Controls.NewButton.Add_Click({
     }
 })
 
+$Controls.DeleteButton.Add_Click({
+    Invoke-UiAction -Context 'Delete document' -Action {
+        Delete-CurrentDocument
+    }
+})
+
 $Controls.SaveButton.Add_Click({
     Invoke-UiAction -Context 'Save document' -Action {
         Save-CurrentDocument
@@ -2450,6 +2877,18 @@ $Controls.ApplyDraftButton.Add_Click({
     }
 })
 
+$Controls.ExpandAllButton.Add_Click({
+    Invoke-UiAction -Context 'Expand tree' -Action {
+        Set-TreeExpansionState -Items $Controls.PromptTree.Items -Expanded:$true
+    }
+})
+
+$Controls.CollapseAllButton.Add_Click({
+    Invoke-UiAction -Context 'Collapse tree' -Action {
+        Set-TreeExpansionState -Items $Controls.PromptTree.Items -Expanded:$false
+    }
+})
+
 $Window.Add_Closing({
     if (-not (Confirm-DiscardChanges)) {
         $_.Cancel = $true
@@ -2457,6 +2896,7 @@ $Window.Add_Closing({
 })
 
 Show-EmptyEditor
+Populate-NewCategoryCombo
 Update-WindowTitle
 
 if ($InitialModRoot) {

@@ -254,3 +254,14 @@ The right-hand reference pane can show:
 ## Disclaimer
 
 This project is an external editor for Sentient Sands content. It is not Kenshi itself and is not a replacement for the original mod.
+
+## Changelog
+
+v1.1
+
+- fixed failed creation of new custom fields
+- fixed explorer tree in content prompts always expanded
+- Added Expand/Collapse all button
+- Added default custom fields when creating a new entry
+- New entry selection via drop down
+- Added option to delete entries

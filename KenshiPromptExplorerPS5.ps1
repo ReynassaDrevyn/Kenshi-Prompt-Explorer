@@ -724,20 +724,6 @@ function Add-MandatoryTreeChildren {
             })
 
         Add-MandatoryTreeChildren -RootPath $dir.FullName -BasePath $BasePath -TargetCollection $tempItem.Items -Search $Search
-        foreach ($file in @(Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
-            $relativePath = $file.FullName.Substring($BasePath.Length).TrimStart('\')
-            if (-not (Test-SearchMatch -Search $Search -Text $relativePath) -and -not (Test-SearchMatch -Search $Search -Text $file.Name)) {
-                continue
-            }
-
-            $child = New-TreeItem -Header $file.Name -NodeData ([pscustomobject]@{
-                    Kind         = 'MandatoryFile'
-                    DisplayName  = $file.Name
-                    Path         = $file.FullName
-                    RelativePath = $relativePath
-                })
-            $tempItem.Items.Add($child) | Out-Null
-        }
 
         $folderMatches = (Test-SearchMatch -Search $Search -Text $dir.Name) -or (Test-SearchMatch -Search $Search -Text $tempItem.Tag.RelativePath)
         if ($tempItem.Items.Count -gt 0 -or $folderMatches -or -not $Search) {
@@ -1745,7 +1731,7 @@ if ($SelfTest) {
 
         <WrapPanel Grid.Row="2" HorizontalAlignment="Right">
           <Button x:Name="NewButton" Content="New" Height="36"/>
-          <Button x:Name="CreateFromTemplateButton" Content="From Template" Height="36"/>
+          <Button x:Name="CreateFromTemplateButton" Content="From Existing" Height="36"/>
           <Button x:Name="DeleteButton" Content="Delete" Height="36"/>
           <Button x:Name="SaveButton" Content="Save" Height="36"/>
           <Button x:Name="SaveAsButton" Content="Save As" Height="36"/>

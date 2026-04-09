@@ -317,6 +317,15 @@ function Get-ModContext {
     }
 }
 
+function Get-TemplateWorkspaceName {
+    return '[Template]'
+}
+
+function Test-IsTemplateWorkspace {
+    param([string]$Campaign)
+    return $Campaign -eq (Get-TemplateWorkspaceName)
+}
+
 function Normalize-FieldKey {
     param([Parameter(Mandatory)][string]$FieldName)
     return $FieldName.Trim().TrimStart('$').ToLowerInvariant().Replace(' ', '_')
@@ -644,13 +653,16 @@ function Get-ModeRootPath {
         [Parameter(Mandatory)][string]$Mode
     )
 
+    if (Test-IsTemplateWorkspace -Campaign $Campaign) {
+        return (Get-TemplateModeRootPath -Context $Context -Mode $Mode)
+    }
+
     $campaignRoot = Join-Path $Context.CampaignsRoot $Campaign
     if ($Mode -eq 'Gameplay Prompts') {
-        Join-Path $campaignRoot 'mandatory'
+        return (Join-Path $campaignRoot 'mandatory')
     }
-    else {
-        Join-Path $campaignRoot 'categories'
-    }
+
+    return (Join-Path $campaignRoot 'categories')
 }
 
 function Get-TemplateModeRootPath {
@@ -1335,6 +1347,7 @@ function Show-NewEntityDialog {
         <TextBox x:Name="IdBox" Grid.Column="1" Padding="8" Background="#FFFFFF" Foreground="#111827" BorderBrush="#CBD5E1"/>
       </Grid>
       <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+        <Button x:Name="TemplateButton" Content="Create from template" Margin="0,0,8,0"/>
         <Button x:Name="CancelButton" Content="Cancel" Width="88" Margin="0,0,8,0"/>
         <Button x:Name="OkButton" Content="OK" Width="88" IsDefault="True"/>
       </StackPanel>
@@ -1363,6 +1376,10 @@ function Show-NewEntityDialog {
         }
     })
 
+    $window.FindName('TemplateButton').Add_Click({
+        $window.Tag = 'CreateFromTemplate'
+        $window.DialogResult = $true
+    })
     $window.FindName('CancelButton').Add_Click({ $window.DialogResult = $false })
     $window.FindName('OkButton').Add_Click({
         if (-not $folderBox.Text.Trim()) {
@@ -1384,6 +1401,7 @@ function Show-NewEntityDialog {
     }
 
     return [pscustomobject]@{
+        Action      = if ($window.Tag) { [string]$window.Tag } else { 'CreateNew' }
         FolderName  = (ConvertTo-Slug -Text $folderBox.Text)
         DisplayName = $displayBox.Text.Trim()
         EntryId     = (ConvertTo-Slug -Text $idBox.Text)
@@ -1435,6 +1453,128 @@ function Show-OpenFilePicker {
     if ($dialog.ShowDialog()) {
         return $dialog.FileName
     }
+    return $null
+}
+
+function Show-TemplatePickerDialog {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [string]$InitialMode = 'Content Prompts'
+    )
+
+    [xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create From Template"
+        Width="900"
+        Height="680"
+        MinWidth="760"
+        MinHeight="560"
+        WindowStartupLocation="CenterOwner"
+        Background="#F8FAFC"
+        Foreground="#111827"
+        FontFamily="Segoe UI">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <WrapPanel Margin="0,0,0,10">
+      <TextBlock Text="Source Workspace" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <ComboBox x:Name="PickerSourceCombo" Width="170" Margin="0,0,18,0"/>
+      <TextBlock Text="Browse Mode" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <ComboBox x:Name="PickerModeCombo" Width="180" Margin="0,0,18,0"/>
+      <TextBlock Text="Search" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <TextBox x:Name="PickerSearchBox" Width="280" Height="32"/>
+    </WrapPanel>
+    <Grid Grid.Row="1">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+      <TextBlock x:Name="SelectionText" Text="Select a template file or entity." Foreground="#475569" Margin="0,0,0,8"/>
+      <TreeView x:Name="PickerTree" Grid.Row="1" Background="#FFFFFF" BorderBrush="#CBD5E1" Foreground="#111827"/>
+    </Grid>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button x:Name="CancelButton" Content="Cancel" Width="88" Margin="0,0,8,0"/>
+      <Button x:Name="CreateButton" Content="Create Copy" Width="110" IsDefault="True"/>
+    </StackPanel>
+  </Grid>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlNodeReader]::new($xaml)
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+    $sourceCombo = $window.FindName('PickerSourceCombo')
+    $modeCombo = $window.FindName('PickerModeCombo')
+    $searchBox = $window.FindName('PickerSearchBox')
+    $tree = $window.FindName('PickerTree')
+    $selectionText = $window.FindName('SelectionText')
+    $sourceCombo.Items.Add((Get-TemplateWorkspaceName)) | Out-Null
+    foreach ($campaign in $Context.Campaigns) {
+        $sourceCombo.Items.Add($campaign.Name) | Out-Null
+    }
+    $sourceCombo.SelectedItem = (Get-TemplateWorkspaceName)
+    $modeCombo.Items.Add('Gameplay Prompts') | Out-Null
+    $modeCombo.Items.Add('Content Prompts') | Out-Null
+    $modeCombo.SelectedItem = if ($InitialMode -eq 'Gameplay Prompts') { 'Gameplay Prompts' } else { 'Content Prompts' }
+
+    $refreshTree = {
+        $tree.Items.Clear()
+        $selectedWorkspace = [string]$sourceCombo.SelectedItem
+        $selectedMode = [string]$modeCombo.SelectedItem
+        $sourceRoot = Get-ModeRootPath -Context $Context -Campaign $selectedWorkspace -Mode $selectedMode
+        $search = $searchBox.Text.Trim()
+        if ($selectedMode -eq 'Gameplay Prompts') {
+            Add-MandatoryTreeChildren -RootPath $sourceRoot -BasePath $sourceRoot -TargetCollection $tree.Items -Search $search
+        }
+        else {
+            Add-ContentTreeChildren -RootPath $sourceRoot -BasePath $sourceRoot -TargetCollection $tree.Items -Search $search
+        }
+        $workspaceLabel = if (Test-IsTemplateWorkspace -Campaign $selectedWorkspace) { 'Template' } else { $selectedWorkspace }
+        $selectionText.Text = "Source: $workspaceLabel / $selectedMode"
+    }
+
+    $tree.Add_SelectedItemChanged({
+        $selected = $tree.SelectedItem
+        if ($selected -and $selected.Tag) {
+            $selectionText.Text = "Selected: $($selected.Tag.RelativePath)"
+        }
+    })
+
+    $sourceCombo.Add_SelectionChanged({ & $refreshTree })
+    $modeCombo.Add_SelectionChanged({ & $refreshTree })
+    $searchBox.Add_TextChanged({ & $refreshTree })
+    $window.FindName('CancelButton').Add_Click({ $window.DialogResult = $false })
+    $window.FindName('CreateButton').Add_Click({
+        $selected = $tree.SelectedItem
+        if (-not $selected -or -not $selected.Tag) {
+            Show-Message -Message 'Select a template file or entity first.' -Icon Warning | Out-Null
+            return
+        }
+
+        $selectedMode = [string]$modeCombo.SelectedItem
+        $expectedKind = if ($selectedMode -eq 'Gameplay Prompts') { 'MandatoryFile' } else { 'EntityFile' }
+        if ($selected.Tag.Kind -ne $expectedKind) {
+            Show-Message -Message 'Select a template file or entity, not a folder.' -Icon Warning | Out-Null
+            return
+        }
+
+        $window.Tag = [pscustomobject]@{
+            Mode            = $selectedMode
+            SourceWorkspace = [string]$sourceCombo.SelectedItem
+            Node            = $selected.Tag
+        }
+        $window.DialogResult = $true
+    })
+
+    & $refreshTree
+    $result = $window.ShowDialog()
+    if ($result -and $window.Tag) {
+        return $window.Tag
+    }
+
     return $null
 }
 
@@ -1552,40 +1692,60 @@ if ($SelfTest) {
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
 
-        <Grid Grid.Row="0" Grid.ColumnSpan="2">
+        <Grid Grid.Row="0" Margin="0,0,0,12">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <TextBox x:Name="RootPathBox" Height="36" IsReadOnly="True" Margin="0,0,10,10" Background="#F8FAFC"/>
-          <Button x:Name="OpenFolderButton" Grid.Column="1" Content="Open Mod Folder" Height="36" Margin="0,0,8,10" Style="{StaticResource AccentButton}"/>
-          <Button x:Name="ImportZipButton" Grid.Column="2" Content="Import Zip" Height="36" Margin="0,0,0,10"/>
+          <TextBox x:Name="RootPathBox" Height="36" IsReadOnly="True" Margin="0,0,10,0" Background="#F8FAFC"/>
+          <Button x:Name="OpenFolderButton" Grid.Column="1" Content="Open Mod Folder" Height="36" Margin="0,0,8,0" Style="{StaticResource AccentButton}"/>
+          <Button x:Name="ImportZipButton" Grid.Column="2" Content="Import Zip" Height="36" Margin="0"/>
         </Grid>
 
-        <WrapPanel Grid.Row="1" Grid.Column="0" VerticalAlignment="Center">
-          <TextBlock Text="Campaign" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <ComboBox x:Name="CampaignCombo" Width="170" Margin="0,0,18,0"/>
-          <TextBlock Text="Mode" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <ComboBox x:Name="ModeCombo" Width="180" Margin="0,0,18,0"/>
-          <TextBlock Text="Provider" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <ComboBox x:Name="ProviderCombo" Width="170" Margin="0,0,18,0"/>
-          <TextBlock Text="Model" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <ComboBox x:Name="ModelCombo" Width="220" Margin="0,0,18,0"/>
-          <TextBlock Text="Search" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <TextBox x:Name="SearchBox" Width="260" Height="34"/>
-        </WrapPanel>
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="170"/>
+            <ColumnDefinition Width="180"/>
+            <ColumnDefinition Width="170"/>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="260"/>
+            <ColumnDefinition Width="180"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
 
-        <WrapPanel Grid.Row="1" Grid.Column="1" HorizontalAlignment="Right">
-          <TextBlock x:Name="NewCategoryLabel" Text="New In" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <ComboBox x:Name="NewCategoryCombo" Width="180" Margin="0,0,10,0"/>
+          <StackPanel Grid.Column="0" Margin="0,0,12,0">
+            <TextBlock Text="Campaign" Margin="0,0,0,6"/>
+            <ComboBox x:Name="CampaignCombo" Height="36"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Margin="0,0,12,0">
+            <TextBlock Text="Mode" Margin="0,0,0,6"/>
+            <ComboBox x:Name="ModeCombo" Height="36"/>
+          </StackPanel>
+          <StackPanel Grid.Column="2" Margin="0,0,12,0">
+            <TextBlock Text="Provider" Margin="0,0,0,6"/>
+            <ComboBox x:Name="ProviderCombo" Height="36"/>
+          </StackPanel>
+          <StackPanel Grid.Column="3" Margin="0,0,12,0">
+            <TextBlock Text="Model" Margin="0,0,0,6"/>
+            <ComboBox x:Name="ModelCombo" Height="36"/>
+          </StackPanel>
+          <StackPanel Grid.Column="4" Margin="0,0,12,0">
+            <TextBlock Text="Search" Margin="0,0,0,6"/>
+            <TextBox x:Name="SearchBox" Height="36"/>
+          </StackPanel>
+          <StackPanel Grid.Column="5" Margin="0,0,12,0">
+            <TextBlock x:Name="NewCategoryLabel" Text="New In" Margin="0,0,0,6"/>
+            <ComboBox x:Name="NewCategoryCombo" Height="36"/>
+          </StackPanel>
+        </Grid>
+
+        <WrapPanel Grid.Row="2" HorizontalAlignment="Right">
           <Button x:Name="NewButton" Content="New" Height="36"/>
+          <Button x:Name="CreateFromTemplateButton" Content="From Template" Height="36"/>
           <Button x:Name="DeleteButton" Content="Delete" Height="36"/>
           <Button x:Name="SaveButton" Content="Save" Height="36"/>
           <Button x:Name="SaveAsButton" Content="Save As" Height="36"/>
@@ -1689,7 +1849,7 @@ foreach ($name in @(
         'RootPathBox', 'OpenFolderButton', 'ImportZipButton', 'CampaignCombo', 'ModeCombo', 'ProviderCombo', 'ModelCombo', 'SearchBox',
         'NewCategoryLabel', 'NewCategoryCombo',
         'ExpandAllButton', 'CollapseAllButton',
-        'NewButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
+        'NewButton', 'CreateFromTemplateButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
         'EditorHeaderText', 'MandatoryEditor', 'StructuredEditorScroll', 'StructuredEditorPanel', 'RawEntityEditor',
         'EmptyStateText', 'MetadataText', 'PreviewTextBox', 'ReferenceTextBox', 'TemplateReferenceCheckBox',
         'AiInstructionsBox', 'AiDraftTextBox', 'StatusText'
@@ -2140,6 +2300,7 @@ function Populate-Combos {
     $script:State.SuspendUiEvents = $true
     try {
         $Controls.CampaignCombo.Items.Clear()
+        [void]$Controls.CampaignCombo.Items.Add((Get-TemplateWorkspaceName))
         foreach ($campaign in $script:State.ModContext.Campaigns) {
             [void]$Controls.CampaignCombo.Items.Add($campaign.Name)
         }
@@ -2200,7 +2361,8 @@ function Load-ModRoot {
     Refresh-Tree
     Show-EmptyEditor
     Set-Dirty -Value $false
-    Set-Status -Text "Loaded mod root: $($script:State.ModContext.ModRoot)"
+    $workspaceLabel = if (Test-IsTemplateWorkspace -Campaign $script:State.CurrentCampaign) { 'Template' } else { $script:State.CurrentCampaign }
+    Set-Status -Text "Loaded mod root: $($script:State.ModContext.ModRoot)  Workspace: $workspaceLabel"
 }
 
 function Get-SelectedTreeNodeData {
@@ -2291,6 +2453,8 @@ function Populate-NewCategoryCombo {
 }
 
 function Get-ContentCreationTarget {
+    param([string]$PreferredCategoryName)
+
     $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
     $selectedRoot = Get-CurrentContentCategoryRoot
     if ($selectedRoot -and (Test-Path -LiteralPath $selectedRoot -PathType Container)) {
@@ -2304,7 +2468,7 @@ function Get-ContentCreationTarget {
         }
     }
 
-    $categoryName = if ($Controls.NewCategoryCombo.SelectedItem) { [string]$Controls.NewCategoryCombo.SelectedItem } else { '' }
+    $categoryName = if ($PreferredCategoryName) { $PreferredCategoryName } elseif ($Controls.NewCategoryCombo.SelectedItem) { [string]$Controls.NewCategoryCombo.SelectedItem } else { '' }
     if ($categoryName) {
         $categoryRoot = Join-Path $modeRoot $categoryName
         if (Test-Path -LiteralPath $categoryRoot -PathType Container) {
@@ -2326,6 +2490,147 @@ function Get-ContentCreationTarget {
     }
 
     return $null
+}
+
+function Get-UniqueFolderName {
+    param(
+        [Parameter(Mandatory)][string]$ParentPath,
+        [Parameter(Mandatory)][string]$BaseName
+    )
+
+    $candidate = $BaseName
+    $index = 2
+    while (Test-Path -LiteralPath (Join-Path $ParentPath $candidate)) {
+        $candidate = '{0}{1}' -f $BaseName, $index
+        $index++
+    }
+    return $candidate
+}
+
+function Get-UniqueFileName {
+    param(
+        [Parameter(Mandatory)][string]$ParentPath,
+        [Parameter(Mandatory)][string]$BaseName,
+        [Parameter(Mandatory)][string]$Extension
+    )
+
+    $candidate = $BaseName + $Extension
+    $index = 2
+    while (Test-Path -LiteralPath (Join-Path $ParentPath $candidate)) {
+        $candidate = '{0}{1}{2}' -f $BaseName, $index, $Extension
+        $index++
+    }
+    return $candidate
+}
+
+function Copy-EntityDocumentForNewEntry {
+    param(
+        [Parameter(Mandatory)]$SourceDocument,
+        [Parameter(Mandatory)][string]$Category,
+        [Parameter(Mandatory)][string]$FolderName,
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][string]$EntryId
+    )
+
+    $fields = [ordered]@{}
+    $meta = @{}
+    foreach ($key in $SourceDocument.LayoutOrder) {
+        $fields[$key] = if ($SourceDocument.Fields.Contains($key)) { [string]$SourceDocument.Fields[$key] } else { '' }
+        if ($SourceDocument.FieldMeta.ContainsKey($key)) {
+            $meta[$key] = $SourceDocument.FieldMeta[$key]
+        }
+    }
+
+    if (-not $fields.Contains('display_name')) {
+        $fields['display_name'] = ''
+        $meta['display_name'] = [pscustomobject]@{ OriginalKey = 'display_name'; IsProse = $false }
+    }
+
+    $fields['display_name'] = $DisplayName
+
+    return [pscustomobject]@{
+        Header                 = [ordered]@{ Category = $Category; Name = $FolderName; Id = $EntryId }
+        Fields                 = $fields
+        FieldMeta              = $meta
+        LayoutOrder            = @($SourceDocument.LayoutOrder)
+        FreeLines              = @()
+        Warnings               = @()
+        CanRoundTripStructured = $true
+    }
+}
+
+function Copy-TemplateItemToWorkspace {
+    param(
+        [Parameter(Mandatory)]$Selection,
+        [string]$ForcedMode
+    )
+
+    $selectedMode = if ($ForcedMode) { $ForcedMode } else { [string]$Selection.Mode }
+    if ($selectedMode -eq 'Gameplay Prompts') {
+        $targetFolder = Get-CurrentMandatoryTargetFolder
+        Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetFolder
+
+        $sourceInfo = Read-TextFileDetailed -Path $Selection.Node.Path
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Selection.Node.DisplayName) + '_copy'
+        $extension = [System.IO.Path]::GetExtension($Selection.Node.DisplayName)
+        $targetName = Get-UniqueFileName -ParentPath $targetFolder -BaseName $baseName -Extension $extension
+        $targetPath = Join-Path $targetFolder $targetName
+        Write-TextFileDetailed -Path $targetPath -Content $sourceInfo.Content -FileProfile $sourceInfo
+
+        $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Gameplay Prompts'
+        Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
+        Open-TreeNode -Node ([pscustomobject]@{
+            Kind         = 'MandatoryFile'
+            Path         = $targetPath
+            RelativePath = $targetPath.Substring($modeRoot.Length).TrimStart('\')
+        })
+        Set-Dirty -Value $true
+        Set-Status -Text "Created template copy: $targetPath"
+        return
+    }
+
+    $sourceContent = [System.IO.File]::ReadAllText($Selection.Node.Path)
+    $sourceDocument = Parse-EntityDocument -Content $sourceContent
+    if (-not $sourceDocument.CanRoundTripStructured) {
+        throw 'The selected template entity is not compatible with structured copying.'
+    }
+
+    $sourceCategory = [string]$sourceDocument.Header['Category']
+    $target = Get-ContentCreationTarget -PreferredCategoryName $sourceCategory
+    if (-not $target -or -not (Test-Path -LiteralPath $target.RootPath -PathType Container)) {
+        throw 'Unable to resolve a target content folder for the template copy.'
+    }
+
+    if (-not $target.IsCustomRoot -and $Controls.NewCategoryCombo.Items.Contains($sourceCategory)) {
+        $Controls.NewCategoryCombo.SelectedItem = $sourceCategory
+    }
+
+    $sourceFolderName = if ($sourceDocument.Header.Contains('Name') -and $sourceDocument.Header['Name']) { [string]$sourceDocument.Header['Name'] } else { $Selection.Node.DisplayName }
+    $sourceId = if ($sourceDocument.Header.Contains('Id') -and $sourceDocument.Header['Id']) { [string]$sourceDocument.Header['Id'] } else { $sourceFolderName }
+    $sourceDisplayName = if ($sourceDocument.Fields.Contains('display_name') -and $sourceDocument.Fields['display_name']) { [string]$sourceDocument.Fields['display_name'] } else { $sourceFolderName }
+    $folderName = Get-UniqueFolderName -ParentPath $target.RootPath -BaseName (ConvertTo-Slug -Text ($sourceFolderName + '_copy'))
+    $entryId = ConvertTo-Slug -Text ($sourceId + '_copy')
+    $displayName = $sourceDisplayName + '_copy'
+    $newEntity = Copy-EntityDocumentForNewEntry -SourceDocument $sourceDocument -Category $sourceCategory -FolderName $folderName -DisplayName $displayName -EntryId $entryId
+
+    $targetFolder = Join-Path $target.RootPath $folderName
+    [System.IO.Directory]::CreateDirectory($targetFolder) | Out-Null
+    $targetPath = Join-Path $targetFolder 'entity.txt'
+    $newEntityProfile = [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false }
+    Write-TextFileDetailed -Path $targetPath -Content (Render-EntityDocument -Document $newEntity) -FileProfile $newEntityProfile
+
+    $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
+    Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
+    Open-TreeNode -Node ([pscustomobject]@{
+        Kind         = 'EntityFile'
+        DisplayName  = $folderName
+        Path         = $targetPath
+        RelativePath = $targetPath.Substring($modeRoot.Length).TrimStart('\')
+        CategoryName = $sourceCategory
+        FolderPath   = $targetFolder
+    })
+    Set-Dirty -Value $true
+    Set-Status -Text "Created template copy: $targetPath"
 }
 
 function Get-CurrentMandatoryTargetFolder {
@@ -2528,6 +2833,14 @@ function New-Document {
         if (-not $dialog) {
             return
         }
+        if ($dialog.Action -eq 'CreateFromTemplate') {
+            $selection = Show-TemplatePickerDialog -Context $script:State.ModContext -InitialMode 'Content Prompts'
+            if (-not $selection) {
+                return
+            }
+            Copy-TemplateItemToWorkspace -Selection $selection
+            return
+        }
 
         $targetFolder = Join-Path $categoryRoot $dialog.FolderName
         Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetFolder
@@ -2709,7 +3022,12 @@ $Controls.CampaignCombo.Add_SelectionChanged({
         Refresh-Tree
         Show-EmptyEditor
         Set-Dirty -Value $false
-        Set-Status -Text "Switched to campaign '$($script:State.CurrentCampaign)'."
+        if (Test-IsTemplateWorkspace -Campaign $script:State.CurrentCampaign) {
+            Set-Status -Text "Switched to template workspace."
+        }
+        else {
+            Set-Status -Text "Switched to campaign '$($script:State.CurrentCampaign)'."
+        }
     }
 })
 
@@ -2845,6 +3163,18 @@ $Controls.TemplateReferenceCheckBox.Add_Click({
 $Controls.NewButton.Add_Click({
     Invoke-UiAction -Context 'Create document' -Action {
         New-Document
+    }
+})
+
+$Controls.CreateFromTemplateButton.Add_Click({
+    Invoke-UiAction -Context 'Create from template' -Action {
+        if (-not $script:State.ModContext) {
+            return
+        }
+        $selection = Show-TemplatePickerDialog -Context $script:State.ModContext -InitialMode $script:State.CurrentMode
+        if ($selection) {
+            Copy-TemplateItemToWorkspace -Selection $selection
+        }
     }
 })
 

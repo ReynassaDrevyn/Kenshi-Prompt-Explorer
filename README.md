@@ -257,6 +257,12 @@ This project is an external editor for Sentient Sands content. It is not Kenshi 
 
 ## Changelog
 
+v1.3
+
+- Template folder can now be edited
+- Added 'Create from template' with search
+- Reordered upper menu ui
+
 v1.2
 
 - Cleaned some dirty code fragments

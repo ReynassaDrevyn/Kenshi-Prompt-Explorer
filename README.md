@@ -1,6 +1,6 @@
 # Kenshi Prompt Explorer
 
-`Kenshi Prompt Explorer` is a Windows PowerShell + WPF editor for the **Sentient Sands** AI mod for **Kenshi**.
+`Kenshi Prompt Explorer` is a Windows PowerShell + WPF editor for the **Sentient Sands** with **KayakDB** AI mod for **Kenshi**.
 
 It is built to make the mod's prompt and KayakDB data easier to browse, edit, duplicate, and generate without manually digging through the folder structure.
 
@@ -8,7 +8,7 @@ It is built to make the mod's prompt and KayakDB data easier to browse, edit, du
 
 At a high level, the tool lets you:
 
-- open a Sentient Sands mod folder
+- open Sentient Sands mod folder for database access
 - switch between campaign data and the shared `Template` workspace
 - edit `Gameplay Prompts` as plain text
 - edit `Content Prompts` as structured Kayak `entity.txt` entries
@@ -22,7 +22,6 @@ The goal is simple: make Sentient Sands content editing practical, fast, and saf
 ## Main Features
 
 - Campaign selector with a first-class `Template` workspace
-- Provider selector and filtered model selector
 - Searchable file tree
 - Expand / Collapse controls for the explorer tree
 - Plain-text editor for gameplay prompt files
@@ -37,6 +36,7 @@ The goal is simple: make Sentient Sands content editing practical, fast, and saf
 - Content entry creation that clones the real field layout from existing category prototypes
 - Safe path checks to prevent writes outside the opened mod root
 - AI draft generation using the mod's own provider/model settings
+- Provider selector and filtered model selector
 
 ## Quick Start
 
@@ -52,6 +52,8 @@ SentientSands/
 ```
 
 ### 2. Run the script
+
+Easiest way: Right-click and select 'run with PowerShell'
 
 Use the script that matches your PowerShell version:
 

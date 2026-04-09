@@ -257,6 +257,10 @@ This project is an external editor for Sentient Sands content. It is not Kenshi 
 
 ## Changelog
 
+v1.2
+
+- Cleaned some dirty code fragments
+
 v1.1
 
 - fixed failed creation of new custom fields

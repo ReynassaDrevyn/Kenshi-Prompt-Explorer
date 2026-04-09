@@ -285,6 +285,7 @@ This project is an external editor for Sentient Sands data. It is not Kenshi its
 v1.4
 
 - reworked 'Reference' system, now allows user input
+- fixed ai draft apply for custom entities
 
 v1.3
 

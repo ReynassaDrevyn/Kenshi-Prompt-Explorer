@@ -331,6 +331,8 @@ function Parse-EntityDocument {
     $warnings = [System.Collections.Generic.List[string]]::new()
     $reserved = @('Category', 'Name', 'Id')
     $index = 0
+    $lastFieldKey = $null
+    $lastFieldIsProse = $false
 
     foreach ($expected in $reserved) {
         while ($index -lt $lines.Count -and -not $lines[$index].Trim()) {
@@ -356,6 +358,9 @@ function Parse-EntityDocument {
         $raw = $lines[$index]
         $trimmed = $raw.Trim()
         if (-not $trimmed) {
+            if ($lastFieldKey -and $lastFieldIsProse) {
+                $fields[$lastFieldKey] = [string]$fields[$lastFieldKey] + "`n"
+            }
             continue
         }
         if ($trimmed -match '^\[.+\]$') {
@@ -366,6 +371,27 @@ function Parse-EntityDocument {
         }
 
         $parsed = Parse-EntityKvLine -Line $trimmed
+        $treatAsContinuation = $false
+        if ($lastFieldKey -and $lastFieldIsProse) {
+            if (-not $parsed) {
+                $treatAsContinuation = $true
+            }
+            elseif ((-not $parsed.IsProse) -and (-not $parsed.Value) -and $trimmed -match ':\s*$') {
+                $treatAsContinuation = $true
+            }
+        }
+
+        if ($treatAsContinuation) {
+            $existingValue = [string]$fields[$lastFieldKey]
+            if ($existingValue) {
+                $fields[$lastFieldKey] = $existingValue + "`n" + $trimmed
+            }
+            else {
+                $fields[$lastFieldKey] = $trimmed
+            }
+            continue
+        }
+
         if ($parsed -and $reserved -notcontains $parsed.Key) {
             $normalized = $parsed.Normalized
             if (-not $fields.Contains($normalized)) {
@@ -376,9 +402,13 @@ function Parse-EntityDocument {
                 }
                 $layoutOrder.Add($normalized)
             }
+            $lastFieldKey = $normalized
+            $lastFieldIsProse = [bool]$meta[$normalized].IsProse
         }
         else {
             $freeLines.Add($trimmed)
+            $lastFieldKey = $null
+            $lastFieldIsProse = $false
         }
     }
 
@@ -518,15 +548,27 @@ function New-EntityDocumentFromTemplate {
         [Parameter(Mandatory)][string]$FolderName,
         [Parameter(Mandatory)][string]$DisplayName,
         [Parameter(Mandatory)][string]$EntryId,
-        $TemplateDocument
+        $TemplateDocument,
+        [string[]]$SelectedProseFields = @()
     )
 
     $fields = [ordered]@{}
     $meta = @{}
     $layoutOrder = [System.Collections.Generic.List[string]]::new()
+    $selectedProseLookup = @{}
+    foreach ($fieldName in @($SelectedProseFields)) {
+        if ($fieldName) {
+            $selectedProseLookup[(Normalize-FieldKey -FieldName $fieldName)] = $true
+        }
+    }
+    $filterProseFields = ($Category -eq 'world_lore')
 
     if ($TemplateDocument -and $TemplateDocument.CanRoundTripStructured) {
         foreach ($key in $TemplateDocument.LayoutOrder) {
+            $fieldIsProse = ($TemplateDocument.FieldMeta.ContainsKey($key) -and [bool]$TemplateDocument.FieldMeta[$key].IsProse)
+            if ($filterProseFields -and $fieldIsProse -and -not $selectedProseLookup.ContainsKey($key)) {
+                continue
+            }
             if (-not $fields.Contains($key)) {
                 $fields[$key] = ''
                 if ($TemplateDocument.FieldMeta.ContainsKey($key)) {
@@ -539,6 +581,20 @@ function New-EntityDocumentFromTemplate {
                     }
                 }
                 $layoutOrder.Add($key)
+            }
+        }
+
+        if ($filterProseFields) {
+            foreach ($selectedKey in @($SelectedProseFields | ForEach-Object { Normalize-FieldKey -FieldName $_ })) {
+                if (-not $selectedKey -or $fields.Contains($selectedKey)) {
+                    continue
+                }
+                $fields[$selectedKey] = ''
+                $meta[$selectedKey] = [pscustomobject]@{
+                    OriginalKey = $selectedKey
+                    IsProse     = $true
+                }
+                $layoutOrder.Add($selectedKey)
             }
         }
     }
@@ -593,6 +649,61 @@ function Get-EntityDocumentsFromRoot {
     }
 
     return @($documents)
+}
+
+function Get-WorldLoreSelectableFields {
+    param(
+        [string[]]$RootPaths
+    )
+
+    $fieldEntries = @{}
+    foreach ($rootPath in @($RootPaths | Where-Object { $_ })) {
+        foreach ($document in @(Get-EntityDocumentsFromRoot -RootPath $rootPath)) {
+            $entryIdentity = if ($document.Header.Contains('Id') -and $document.Header['Id']) {
+                [string]$document.Header['Id']
+            }
+            elseif ($document.Header.Contains('Name') -and $document.Header['Name']) {
+                [string]$document.Header['Name']
+            }
+            else {
+                [guid]::NewGuid().ToString()
+            }
+
+            foreach ($key in $document.LayoutOrder) {
+                if (-not $document.FieldMeta.ContainsKey($key)) {
+                    continue
+                }
+                if (-not [bool]$document.FieldMeta[$key].IsProse) {
+                    continue
+                }
+
+                if (-not $fieldEntries.ContainsKey($key)) {
+                    $fieldEntries[$key] = [pscustomobject]@{
+                        EntryIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        Label    = if ($document.FieldMeta[$key].OriginalKey) { [string]$document.FieldMeta[$key].OriginalKey } else { [string]$key }
+                    }
+                }
+                [void]$fieldEntries[$key].EntryIds.Add($entryIdentity)
+            }
+        }
+    }
+
+    $priority = @{
+        description      = 100
+        surface          = 110
+        deeper           = 120
+        significance     = 130
+        physical_remains = 140
+    }
+
+    return @(
+        $fieldEntries.GetEnumerator() |
+            Where-Object { $_.Value.EntryIds.Count -ge 2 } |
+            Sort-Object `
+                @{ Expression = { if ($priority.ContainsKey($_.Key)) { $priority[$_.Key] } else { 1000 } } }, `
+                @{ Expression = { $_.Value.Label } } |
+            ForEach-Object { [string]$_.Value.Label }
+    )
 }
 
 
@@ -921,10 +1032,20 @@ function Get-ReferenceTextForDocument {
 
     if ($UseTemplate) {
         $referencePath = Join-Path $templateRoot $Document.RelativePath
-        if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf)) {
-            return ''
+        if (Test-Path -LiteralPath $referencePath -PathType Leaf) {
+            return [System.IO.File]::ReadAllText($referencePath)
         }
-        return [System.IO.File]::ReadAllText($referencePath)
+
+        if ($Document.Type -eq 'EntityStructured' -and $Document.Entity) {
+            return (Render-EntityDocument -Document $Document.Entity)
+        }
+        if ($Document.FileProfile -and $Document.FileProfile.PSObject.Properties['Content']) {
+            return [string]$Document.FileProfile.Content
+        }
+        if (Test-Path -LiteralPath $Document.Path -PathType Leaf) {
+            return [System.IO.File]::ReadAllText($Document.Path)
+        }
+        return ''
     }
 
     if (-not $referencePath) {
@@ -1246,7 +1367,8 @@ function Show-NewEntityDialog {
         [Parameter(Mandatory)][string]$Category,
         [string]$FolderName = '',
         [string]$DisplayName = '',
-        [string]$EntryId = ''
+        [string]$EntryId = '',
+        [string[]]$SelectableProseFields = @()
     )
 
     [xml]$xaml = @'
@@ -1263,6 +1385,7 @@ function Show-NewEntityDialog {
   <Border Padding="18">
     <Grid>
       <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
@@ -1294,7 +1417,8 @@ function Show-NewEntityDialog {
         <TextBlock Text="Id" VerticalAlignment="Center"/>
         <TextBox x:Name="IdBox" Grid.Column="1" Padding="8" Background="#FFFFFF" Foreground="#111827" BorderBrush="#CBD5E1"/>
       </Grid>
-      <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+      <StackPanel x:Name="OptionsPanel" Grid.Row="4" Margin="0,12,0,0"/>
+      <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
         <Button x:Name="TemplateButton" Content="Create from template" Margin="0,0,8,0"/>
         <Button x:Name="CancelButton" Content="Cancel" Width="88" Margin="0,0,8,0"/>
         <Button x:Name="OkButton" Content="OK" Width="88" IsDefault="True"/>
@@ -1311,9 +1435,39 @@ function Show-NewEntityDialog {
     $folderBox = $window.FindName('FolderNameBox')
     $displayBox = $window.FindName('DisplayNameBox')
     $idBox = $window.FindName('IdBox')
+    $optionsPanel = $window.FindName('OptionsPanel')
+    $proseFieldBoxes = [System.Collections.Generic.List[object]]::new()
     $folderBox.Text = $FolderName
     $displayBox.Text = $DisplayName
     $idBox.Text = $EntryId
+
+    if (@($SelectableProseFields).Count -gt 0) {
+        $group = [System.Windows.Controls.GroupBox]::new()
+        $group.Header = 'World Lore Fields'
+        $group.Margin = '0,0,0,0'
+        $group.Padding = '10'
+
+        $stack = [System.Windows.Controls.StackPanel]::new()
+        $stack.Margin = '0,4,0,0'
+
+        $hint = [System.Windows.Controls.TextBlock]::new()
+        $hint.Text = 'Choose which lore prose fields should be created for this entry.'
+        $hint.Margin = '0,0,0,8'
+        $hint.TextWrapping = 'Wrap'
+        $stack.Children.Add($hint) | Out-Null
+
+        foreach ($fieldName in $SelectableProseFields) {
+            $check = [System.Windows.Controls.CheckBox]::new()
+            $check.Content = $fieldName
+            $check.IsChecked = $true
+            $check.Margin = '0,0,0,4'
+            $proseFieldBoxes.Add($check) | Out-Null
+            $stack.Children.Add($check) | Out-Null
+        }
+
+        $group.Content = $stack
+        $optionsPanel.Children.Add($group) | Out-Null
+    }
 
     $displayBox.Add_TextChanged({
         if (-not $folderBox.IsKeyboardFocusWithin -and -not $folderBox.Text.Trim()) {
@@ -1353,6 +1507,7 @@ function Show-NewEntityDialog {
         FolderName  = (ConvertTo-Slug -Text $folderBox.Text)
         DisplayName = $displayBox.Text.Trim()
         EntryId     = (ConvertTo-Slug -Text $idBox.Text)
+        SelectedProseFields = @($proseFieldBoxes | Where-Object { $_.IsChecked } | ForEach-Object { [string]$_.Content })
     }
 }
 
@@ -2774,7 +2929,15 @@ function New-Document {
             return
         }
 
-        $dialog = Show-NewEntityDialog -Title 'New Entity' -Category $category
+        $worldLoreFieldOptions = @()
+        if (-not $creationTarget.IsCustomRoot -and $category -eq 'world_lore') {
+            $templateRoot = Get-TemplateModeRootPath -Context $script:State.ModContext -Mode 'Content Prompts'
+            $builtinCategoryRoot = Join-Path $modeRoot $category
+            $templateCategoryRoot = Join-Path $templateRoot $category
+            $worldLoreFieldOptions = Get-WorldLoreSelectableFields -RootPaths @($templateCategoryRoot, $builtinCategoryRoot)
+        }
+
+        $dialog = Show-NewEntityDialog -Title 'New Entity' -Category $category -SelectableProseFields $worldLoreFieldOptions
         if (-not $dialog) {
             return
         }
@@ -2825,7 +2988,7 @@ function New-Document {
                 Get-FirstEntityDocumentFromRoot -RootPath $builtinCategoryRoot
             }
         }
-        $newEntity = New-EntityDocumentFromTemplate -Category $category -FolderName $dialog.FolderName -DisplayName $dialog.DisplayName -EntryId $dialog.EntryId -TemplateDocument $prototypeDocument
+        $newEntity = New-EntityDocumentFromTemplate -Category $category -FolderName $dialog.FolderName -DisplayName $dialog.DisplayName -EntryId $dialog.EntryId -TemplateDocument $prototypeDocument -SelectedProseFields $dialog.SelectedProseFields
         $content = Render-EntityDocument -Document $newEntity
         $newEntityProfile = [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false }
         Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $newEntityProfile

@@ -961,8 +961,9 @@ function Get-ReferenceTextForDocument {
     if ($UseTemplate) {
         $referencePath = Join-Path $templateRoot $Document.RelativePath
         if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf)) {
-            $referencePath = $null
+            return ''
         }
+        return [System.IO.File]::ReadAllText($referencePath)
     }
 
     if (-not $referencePath) {

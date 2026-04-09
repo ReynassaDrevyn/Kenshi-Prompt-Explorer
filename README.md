@@ -257,6 +257,10 @@ This project is an external editor for Sentient Sands content. It is not Kenshi 
 
 ## Changelog
 
+v1.4
+
+- Reference system reworked, can now use entity data or user input
+
 v1.3
 
 - Template folder can now be edited

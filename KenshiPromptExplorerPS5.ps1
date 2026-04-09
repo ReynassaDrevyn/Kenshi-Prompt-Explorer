@@ -1731,7 +1731,7 @@ if ($SelfTest) {
 
         <WrapPanel Grid.Row="2" HorizontalAlignment="Right">
           <Button x:Name="NewButton" Content="New" Height="36"/>
-          <Button x:Name="CreateFromTemplateButton" Content="From Existing" Height="36"/>
+          <Button x:Name="CreateFromTemplateButton" Content="From Template" Height="36"/>
           <Button x:Name="DeleteButton" Content="Delete" Height="36"/>
           <Button x:Name="SaveButton" Content="Save" Height="36"/>
           <Button x:Name="SaveAsButton" Content="Save As" Height="36"/>
@@ -1799,7 +1799,7 @@ if ($SelfTest) {
                 <RowDefinition Height="*"/>
               </Grid.RowDefinitions>
               <CheckBox x:Name="TemplateReferenceCheckBox" Content="Use Template Reference" Margin="0,0,0,10"/>
-              <TextBox x:Name="ReferenceTextBox" Grid.Row="1" AcceptsReturn="True" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code"/>
+              <TextBox x:Name="ReferenceTextBox" Grid.Row="1" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code"/>
             </Grid>
           </TabItem>
           <TabItem Header="AI Draft">
@@ -1851,6 +1851,7 @@ $script:State = [ordered]@{
     IsDirty             = $false
     SuspendEditorEvents = $false
     SuspendUiEvents     = $false
+    SuspendReferenceEvents = $false
     LastStatus          = 'Ready.'
 }
 
@@ -1912,9 +1913,12 @@ function Get-CurrentEditorText {
 
 function Update-PreviewAndReference {
     if (-not $script:State.CurrentDocument -or -not $script:State.ModContext) {
+        $script:State.SuspendReferenceEvents = $true
         $Controls.PreviewTextBox.Text = ''
         $Controls.MetadataText.Text = ''
         $Controls.ReferenceTextBox.Text = ''
+        $Controls.ReferenceTextBox.IsReadOnly = $true
+        $script:State.SuspendReferenceEvents = $false
         return
     }
 
@@ -1936,8 +1940,18 @@ function Update-PreviewAndReference {
     }
     $Controls.MetadataText.Text = ($metadata -join '    ')
 
-    $referenceText = Get-ReferenceTextForDocument -Context $script:State.ModContext -Document $doc -Mode $script:State.CurrentMode -UseTemplate:$Controls.TemplateReferenceCheckBox.IsChecked
-    $Controls.ReferenceTextBox.Text = $referenceText
+    $script:State.SuspendReferenceEvents = $true
+    if ($Controls.TemplateReferenceCheckBox.IsChecked) {
+        $referenceText = Get-ReferenceTextForDocument -Context $script:State.ModContext -Document $doc -Mode $script:State.CurrentMode -UseTemplate:$true
+        $Controls.ReferenceTextBox.IsReadOnly = $true
+        $Controls.ReferenceTextBox.Text = $referenceText
+    }
+    else {
+        $Controls.ReferenceTextBox.IsReadOnly = $false
+        $manualReference = if ($doc.PSObject.Properties['ManualReferenceText']) { [string]$doc.ManualReferenceText } else { '' }
+        $Controls.ReferenceTextBox.Text = $manualReference
+    }
+    $script:State.SuspendReferenceEvents = $false
 }
 
 function Show-EmptyEditor {
@@ -1947,7 +1961,10 @@ function Show-EmptyEditor {
     $Controls.RawEntityEditor.Visibility = 'Collapsed'
     $Controls.EditorHeaderText.Text = ''
     $Controls.PreviewTextBox.Text = ''
+    $script:State.SuspendReferenceEvents = $true
     $Controls.ReferenceTextBox.Text = ''
+    $Controls.ReferenceTextBox.IsReadOnly = $true
+    $script:State.SuspendReferenceEvents = $false
     $Controls.MetadataText.Text = ''
 }
 
@@ -2171,6 +2188,7 @@ function Load-MandatoryDocument {
         RelativePath = $Node.RelativePath
         Campaign     = $script:State.CurrentCampaign
         FileProfile  = $fileProfile
+        ManualReferenceText = ''
     }
     $script:State.SuspendEditorEvents = $true
     $Controls.EmptyStateText.Visibility = 'Collapsed'
@@ -2196,6 +2214,7 @@ function Load-EntityDocument {
         Campaign     = $script:State.CurrentCampaign
         FileProfile  = $fileProfile
         Entity       = $entity
+        ManualReferenceText = ''
     }
 
     $Controls.EmptyStateText.Visibility = 'Collapsed'
@@ -2891,7 +2910,12 @@ function Generate-AiDraft {
 
     $modelKey = if ($Controls.ModelCombo.SelectedItem) { [string]$Controls.ModelCombo.SelectedItem } else { $script:State.ModContext.ActiveModel }
     $currentText = Get-CurrentEditorText
-    $referenceText = Get-ReferenceTextForDocument -Context $script:State.ModContext -Document $script:State.CurrentDocument -Mode $script:State.CurrentMode -UseTemplate:$Controls.TemplateReferenceCheckBox.IsChecked
+    $referenceText = if ($Controls.TemplateReferenceCheckBox.IsChecked) {
+        Get-ReferenceTextForDocument -Context $script:State.ModContext -Document $script:State.CurrentDocument -Mode $script:State.CurrentMode -UseTemplate:$true
+    }
+    else {
+        $Controls.ReferenceTextBox.Text
+    }
     $instructions = $Controls.AiInstructionsBox.Text.Trim()
 
     if (-not $instructions) {
@@ -3144,6 +3168,16 @@ $Controls.TemplateReferenceCheckBox.Add_Click({
     Invoke-UiAction -Context 'Reference refresh' -Action {
         Update-PreviewAndReference
     }
+})
+
+$Controls.ReferenceTextBox.Add_TextChanged({
+    if ($script:State.SuspendReferenceEvents -or -not $script:State.CurrentDocument) {
+        return
+    }
+    if ($Controls.TemplateReferenceCheckBox.IsChecked) {
+        return
+    }
+    $script:State.CurrentDocument.ManualReferenceText = $Controls.ReferenceTextBox.Text
 })
 
 $Controls.NewButton.Add_Click({

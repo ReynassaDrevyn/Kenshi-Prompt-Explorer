@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Scope='Function', Target='*')]
 [CmdletBinding()]
 param(
     [string]$InitialModRoot,
@@ -21,17 +22,17 @@ function Restart-InStaIfNeeded {
     }
 
     $procPath = [System.Diagnostics.Process]::GetCurrentProcess().Path
-    $args = [System.Collections.Generic.List[string]]::new()
-    $args.Add('-NoProfile')
-    $args.Add('-STA')
-    $args.Add('-File')
-    $args.Add($PSCommandPath)
+    $launchArgs = [System.Collections.Generic.List[string]]::new()
+    $launchArgs.Add('-NoProfile')
+    $launchArgs.Add('-STA')
+    $launchArgs.Add('-File')
+    $launchArgs.Add($PSCommandPath)
     if ($InitialModRoot) {
-        $args.Add('-InitialModRoot')
-        $args.Add($InitialModRoot)
+        $launchArgs.Add('-InitialModRoot')
+        $launchArgs.Add($InitialModRoot)
     }
 
-    Start-Process -FilePath $procPath -ArgumentList $args
+    Start-Process -FilePath $procPath -ArgumentList $launchArgs
     exit
 }
 
@@ -1956,13 +1957,13 @@ function Render-StructuredEditor {
 function Load-MandatoryDocument {
     param([Parameter(Mandatory)]$Node)
 
-    $profile = Read-TextFileDetailed -Path $Node.Path
+    $fileProfile = Read-TextFileDetailed -Path $Node.Path
     $script:State.CurrentDocument = [pscustomobject]@{
         Type         = 'Mandatory'
         Path         = $Node.Path
         RelativePath = $Node.RelativePath
         Campaign     = $script:State.CurrentCampaign
-        FileProfile  = $profile
+        FileProfile  = $fileProfile
     }
     $script:State.SuspendEditorEvents = $true
     $Controls.EmptyStateText.Visibility = 'Collapsed'
@@ -1970,7 +1971,7 @@ function Load-MandatoryDocument {
     $Controls.RawEntityEditor.Visibility = 'Collapsed'
     $Controls.MandatoryEditor.Visibility = 'Visible'
     $Controls.EditorHeaderText.Text = $Node.RelativePath
-    $Controls.MandatoryEditor.Text = $profile.Content
+    $Controls.MandatoryEditor.Text = $fileProfile.Content
     $Controls.AiDraftTextBox.Text = ''
     $script:State.SuspendEditorEvents = $false
     Set-Dirty -Value $false
@@ -1980,13 +1981,13 @@ function Load-MandatoryDocument {
 function Load-EntityDocument {
     param([Parameter(Mandatory)]$Node)
 
-    $profile = Read-TextFileDetailed -Path $Node.Path
-    $entity = Parse-EntityDocument -Content $profile.Content
+    $fileProfile = Read-TextFileDetailed -Path $Node.Path
+    $entity = Parse-EntityDocument -Content $fileProfile.Content
     $common = [ordered]@{
         Path         = $Node.Path
         RelativePath = $Node.RelativePath
         Campaign     = $script:State.CurrentCampaign
-        FileProfile  = $profile
+        FileProfile  = $fileProfile
         Entity       = $entity
     }
 
@@ -2006,7 +2007,7 @@ function Load-EntityDocument {
         $script:State.SuspendEditorEvents = $true
         $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
         $Controls.RawEntityEditor.Visibility = 'Visible'
-        $Controls.RawEntityEditor.Text = $profile.Content
+        $Controls.RawEntityEditor.Text = $fileProfile.Content
         $Controls.EditorHeaderText.Text = "$($Node.RelativePath)  [raw mode]"
         $script:State.SuspendEditorEvents = $false
     }
@@ -2398,8 +2399,8 @@ function Save-CurrentDocument {
 
     Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetPath
     $content = Get-CurrentEditorText
-    $profile = if ($doc.FileProfile) { $doc.FileProfile } else { [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
-    Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $profile
+    $outputProfile = if ($doc.FileProfile) { $doc.FileProfile } else { [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
+    Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $outputProfile
 
     if ($SaveAs) {
         Refresh-Tree -PreserveState
@@ -2436,8 +2437,8 @@ function New-Document {
         }
 
         $sibling = Get-ChildItem -LiteralPath $targetFolder -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
-        $profile = if ($sibling) { Read-TextFileDetailed -Path $sibling.FullName } else { [pscustomobject]@{ Content = ''; NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
-        Write-TextFileDetailed -Path $targetPath -Content '' -FileProfile $profile
+        $newFileProfile = if ($sibling) { Read-TextFileDetailed -Path $sibling.FullName } else { [pscustomobject]@{ Content = ''; NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
+        Write-TextFileDetailed -Path $targetPath -Content '' -FileProfile $newFileProfile
         Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring((Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Gameplay Prompts').Length).TrimStart('\'))
         Open-TreeNode -Node ([pscustomobject]@{
             Kind         = 'MandatoryFile'
@@ -2507,8 +2508,8 @@ function New-Document {
         }
         $newEntity = New-EntityDocumentFromTemplate -Category $category -FolderName $dialog.FolderName -DisplayName $dialog.DisplayName -EntryId $dialog.EntryId -TemplateDocument $prototypeDocument
         $content = Render-EntityDocument -Document $newEntity
-        $profile = [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false }
-        Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $profile
+        $newEntityProfile = [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false }
+        Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $newEntityProfile
         Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
         Open-TreeNode -Node ([pscustomobject]@{
             Kind         = 'EntityFile'

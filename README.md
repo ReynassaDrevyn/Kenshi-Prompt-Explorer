@@ -2,58 +2,47 @@
 
 `Kenshi Prompt Explorer` is a Windows PowerShell + WPF editor for the **Sentient Sands** AI mod for **Kenshi**.
 
-It gives you a cleaner way to browse, edit, create, and AI-generate the prompt files and KayakDB content entries that drive the mod.
+It is built to make the mod's prompt and KayakDB data easier to browse, edit, duplicate, and generate without manually digging through the folder structure.
 
-## What This Tool Does
+## What It Does
 
-If you just want the simple version:
+At a high level, the tool lets you:
 
-- Open your extracted `SentientSands` mod folder
-- Pick a campaign
-- Switch between:
-  - `Gameplay Prompts`
-  - `Content Prompts`
-- Browse files in a readable tree
-- Edit them safely
-- Save them back in place
-- Create new prompt files or new content entries
-- Optionally ask an AI to draft or rewrite entries using the same provider/model settings the mod already uses
+- open a Sentient Sands mod folder
+- switch between campaign data and the shared `Template` workspace
+- edit `Gameplay Prompts` as plain text
+- edit `Content Prompts` as structured Kayak `entity.txt` entries
+- create new entries with the same field layout as real existing entries
+- copy entries and prompt files from `Template` or from other campaigns
+- preview the exact text that will be written to disk
+- generate AI drafts using the provider and model configuration already defined by the mod
 
-This tool is meant to be easier than manually digging through folders and editing files in a text editor.
-
-## Who It Is For
-
-This project is useful for:
-
-- players who want to tweak prompt behavior without digging through the whole mod by hand
-- campaign authors who want to create or maintain their own content packs
-- modders who want a structured editor for `entity.txt` content
-- people who want to use AI to draft consistent entries faster
+The goal is simple: make Sentient Sands content editing practical, fast, and safe.
 
 ## Main Features
 
-- Folder-first workflow for extracted Sentient Sands installs
-- Zip import helper for `SentientSands.zip`
-- Campaign selector
-- Provider selector
-- Model selector
+- Campaign selector with a first-class `Template` workspace
+- Provider selector and filtered model selector
 - Searchable file tree
-- Plain-text editing for gameplay prompt files
-- Structured editing for Kayak `entity.txt` content
-- Raw preview of the exact text that will be saved
-- Read-only template/sibling reference pane
-- New / Save / Save As flows
-- AI draft generation using the mod's configured API provider and model
-- Safe-path checks to prevent writing outside the selected mod root
-- Raw fallback mode for malformed `entity.txt` files
+- Expand / Collapse controls for the explorer tree
+- Plain-text editor for gameplay prompt files
+- Structured editor for Kayak `entity.txt` files
+- Raw fallback mode for malformed entries
+- Exact output preview
+- Reference tab with:
+  - template reference mode
+  - manual editable reference text mode
+- `New`, `Save`, `Save As`, and `Delete`
+- `From Template` copy flow for both gameplay prompts and content entries
+- Content entry creation that clones the real field layout from existing category prototypes
+- Safe path checks to prevent writes outside the opened mod root
+- AI draft generation using the mod's own provider/model settings
 
 ## Quick Start
 
-### 1. Prepare the mod
+### 1. Prepare the mod folder
 
-Use an **extracted** copy of the `SentientSands` mod folder.
-
-The tool expects a folder containing paths like:
+Use an extracted `SentientSands` mod folder that contains paths like:
 
 ```text
 SentientSands/
@@ -62,93 +51,132 @@ SentientSands/
   server/config/providers.json
 ```
 
-If you only have `SentientSands.zip`, the app can import and extract it for you.
-
 ### 2. Run the script
 
-From PowerShell:
+Use the script that matches your PowerShell version:
 
 ```powershell
-pwsh -STA -File .\KenshiPromptExplorer.ps1
+pwsh -STA -File .\KenshiPromptExplorerPS7.ps1
 ```
 
-The script can also relaunch itself in STA mode automatically if needed.
+or:
 
-### 3. Open your mod folder
+```powershell
+powershell.exe -STA -File .\KenshiPromptExplorerPS5.ps1
+```
+
+The scripts can also relaunch themselves in STA mode if needed.
+
+### 3. Open the mod
 
 - Click `Open Mod Folder`
 - Select the extracted `SentientSands` folder
-- Choose your campaign
-- Choose a provider/model if you want to use AI drafting
+- Choose a campaign or select `Template`
 
-### 4. Edit content
+### 4. Start editing
 
-- Use `Gameplay Prompts` for the mod's mandatory prompt files
-- Use `Content Prompts` for Kayak category entries such as characters, factions, locations, lore, and other structured content
-- Click a file or entry in the left tree
+- Use `Gameplay Prompts` for mandatory text prompt files
+- Use `Content Prompts` for Kayak category entries
+- Select an item in the tree
 - Edit it in the center pane
-- Review exact output in the preview pane
+- Review the exact output in `Preview`
 - Save when ready
 
-## Important Folder Rules
+## Workspaces and Folder Rules
 
-This tool intentionally follows the **real runtime source** used by the newer Sentient Sands + Kayak setup.
+The tool intentionally follows the current Kayak-backed Sentient Sands layout.
 
-### Used as the editable source of truth
+### Editable workspaces
 
 - `Kayak\KayakDB\Campaigns\<campaign>\mandatory`
 - `Kayak\KayakDB\Campaigns\<campaign>\categories`
+- `Kayak\KayakDB\Template\mandatory`
+- `Kayak\KayakDB\Template\categories`
 
-### Used as reference only
-
-- `Kayak\KayakDB\Template`
-
-### Intentionally not used as the live editing source
+### Ignored as legacy / non-live sources
 
 - `server\campaigns`
 - `Kayak\addons`
 
-That means if you edit old leftover data in `server\campaigns`, the tool will ignore it on purpose.
+That means the tool edits the active KayakDB content, not the older leftover server campaign files.
 
 ## Editing Modes
 
 ## Gameplay Prompts
 
-This mode is for prompt text files under:
+This mode edits plain text files under:
 
 ```text
-Kayak\KayakDB\Campaigns\<campaign>\mandatory
+mandatory
 ```
 
-These files are edited as plain text.
+Typical examples are chat, biography, loremaster, and speech-related prompt sets.
 
-Typical prompt groups include:
-
-- `Chat`
-- `Biography`
-- `Loremaster`
-- `Speak`
+These files are edited directly as text and saved with their existing file characteristics preserved as closely as possible.
 
 ## Content Prompts
 
-This mode is for structured Kayak content entries under:
+This mode edits structured Kayak content entries under:
 
 ```text
-Kayak\KayakDB\Campaigns\<campaign>\categories
+categories\<category>\<entry>\entity.txt
 ```
 
-Each entry usually lives in its own folder with an `entity.txt`.
+The structured editor understands the standard format:
 
-The editor understands the common Sentient Sands / Kayak structure:
-
-- reserved headers:
-  - `Category`
-  - `Name`
-  - `Id`
+- header lines:
+  - `Category = ...`
+  - `Name = ...`
+  - `Id = ...`
 - normal key/value fields
-- prose fields using `$`
+- prose fields with `$`
 
-If a file does not safely round-trip as structured content, the tool falls back to raw text mode instead of rewriting it destructively.
+If an entry cannot be safely round-tripped as structured data, the tool automatically falls back to raw text mode.
+
+## Creating and Copying Content
+
+### New content entries
+
+When you create a new content entry, the tool does not invent a schema from scratch. It clones the field inventory, ordering, and prose metadata from a real existing prototype entry for that category, then blanks the values for the new item.
+
+This keeps new entries consistent with the way real Sentient Sands data is already structured.
+
+### From Template
+
+The `From Template` action works for both content entries and gameplay prompts.
+
+You can copy from:
+
+- `Template`
+- other campaigns
+
+The picker includes:
+
+- source workspace selection
+- gameplay/content mode selection
+- searchable tree navigation
+
+For content entries, the copied entry is created in the current target workspace as a renamed copy such as:
+
+```text
+originalname_copy
+```
+
+For gameplay prompts, the selected prompt file is copied into the current target prompt folder with a safe `_copy` style name.
+
+## Reference Tab
+
+The `Reference` tab has two modes.
+
+### Use Template Reference enabled
+
+The tool shows the template reference for the current document. This is useful when you want a fixed example from the shared template set.
+
+### Use Template Reference disabled
+
+The reference box becomes an editable text area. You can type or paste your own notes, constraints, examples, or temporary context there.
+
+That manual reference text is also used by AI draft generation.
 
 ## AI Draft Generation
 
@@ -157,109 +185,104 @@ The tool can generate drafts for:
 - gameplay prompt files
 - content `entity.txt` entries
 
-It reads provider and model information from the mod itself:
+It reads the provider/model setup from the mod itself:
 
 - `server/config/providers.json`
 - `server/config/models.json`
 - active model from `config_master.txt`
 - fallback from `SentientSands_Config.ini`
 
-### What the AI feature does
+The AI flow:
 
-- uses the selected provider and model
+- takes the current document
+- takes either template reference text or your manual reference text
+- uses the selected model
 - sends an OpenAI-compatible `chat/completions` request
-- uses the current document plus reference examples
-- places the result into a draft preview first
-- lets you apply the draft manually
+- shows the draft in a preview pane first
+- applies it only if you choose to
 
-### What it does not do
+The tool does not silently overwrite content.
 
-- it does not silently overwrite your file
-- it does not change the mod's config files
-- it does not expose API keys in the UI beyond what is needed to make the request
+## Template Workspace
 
-## For Non-Technical Users
+`Template` is a full editing workspace, not just a reference source.
 
-If you are not interested in the internals, you mostly need to remember four things:
+You can:
 
-1. Open the extracted mod folder.
-2. Pick the campaign you want to edit.
-3. Use `Gameplay Prompts` for core behavior and `Content Prompts` for structured world/NPC data.
-4. Always review the preview pane before saving.
+- browse template gameplay prompts
+- browse template content entries
+- edit and save template files directly
+- create new template entries
+- copy template items into Template itself or into campaigns
 
-## For Modders
+This is useful when you want to maintain the shared base content used across campaigns.
 
-This tool is built around the current Kayak-backed Sentient Sands layout.
+## Technical Notes
 
-### Content parser assumptions
+### Content parsing
 
-Structured `entity.txt` editing follows the real Kayak parsing rules:
+Structured editing follows the real parser assumptions used by the tool:
 
-- first three reserved lines must be:
-  - `Category = ...`
-  - `Name = ...`
-  - `Id = ...`
-- body supports key/value formats such as:
-  - `key = value`
-  - `key: value`
-  - `key -> value`
-- prose fields use a `$` prefix
-- unsupported free-text or malformed structures force raw mode
+- the first three reserved lines are `Category`, `Name`, and `Id`
+- key/value forms such as `=`, `:`, and `->` are accepted during parsing
+- prose fields are tracked through `$` metadata
+- unsupported free text forces raw mode instead of destructive rewriting
 
 ### Save behavior
 
-- mandatory prompt files are treated as plain text
-- `entity.txt` files are reconstructed in a stable order
-- new entries use sibling/template structure when possible
+- gameplay prompt files are treated as text files
+- content entries are rendered back into a stable structured format
 - writes are restricted to the selected mod root
+- unsaved-change prompts help prevent accidental loss
 
-### Reference behavior
+### Tree behavior
 
-The right-hand reference pane can show:
-
-- a template reference from `Kayak\KayakDB\Template`
-- a sibling example from the same campaign/category
-
-### Provider/model behavior
-
-- provider dropdown is populated from `providers.json`
-- model dropdown is populated from `models.json`
-- model list is filtered by selected provider
-- selected model drives AI generation requests
+- content trees start collapsed by default
+- tree state is preserved during normal refresh operations where possible
+- search filters the currently selected workspace and mode
 
 ## Requirements
 
 - Windows
-- PowerShell 7 recommended
-- WPF-capable desktop environment
-- Extracted Sentient Sands mod folder
-- API access only if you want to use AI drafting
+- PowerShell 5.1 or PowerShell 7
+- desktop environment with WPF support
+- extracted Sentient Sands mod folder
+- valid provider/API setup only if you want AI drafting
 
 ## Known Limitations
 
 - Windows-only GUI
-- Not a replacement for engine-side or DLL-side mod changes
+- no engine-side or DLL-side editing
 - AI generation depends entirely on valid provider configuration
-- Malformed content can require raw editing instead of structured editing
-- This tool edits files on disk; it does not patch the compiled game DLL
+- malformed files may require raw editing
+- this tool edits on-disk content only
 
 ## Safety Notes
 
 - The tool is designed to write only inside the selected mod root
 - It warns about unsaved changes
-- It does not use `server\campaigns` as a live source
-- It keeps template data read-only inside the UI
-- There may be bugs
+- It ignores `server\campaigns` on purpose
+- It previews exact output before save
+- AI drafts are previewed before they are applied
+
+## Included Scripts
+
+```text
+KenshiPromptExplorerPS5.ps1
+KenshiPromptExplorerPS7.ps1
+```
+
+Use the PS5 version for Windows PowerShell 5.1 and the PS7 version for PowerShell 7.
 
 ## Disclaimer
 
-This project is an external editor for Sentient Sands content. It is not Kenshi itself and is not a replacement for the original mod.
+This project is an external editor for Sentient Sands data. It is not Kenshi itself and does not replace the original mod or its compiled game-side components.
 
 ## Changelog
 
 v1.4
 
-- Reference system reworked, can now use entity data or user input
+- reworked 'Reference' system, now allows user input
 
 v1.3
 
@@ -269,13 +292,13 @@ v1.3
 
 v1.2
 
-- Cleaned some dirty code fragments
+- cleaned some dirty code fragments
 
 v1.1
 
 - fixed failed creation of new custom fields
 - fixed explorer tree in content prompts always expanded
-- Added Expand/Collapse all button
-- Added default custom fields when creating a new entry
-- New entry selection via drop down
-- Added option to delete entries
+- added Expand/Collapse all button
+- added default custom fields when creating a new entry
+- new entry selection via drop down
+- added option to delete entries

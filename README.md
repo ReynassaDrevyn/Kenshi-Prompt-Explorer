@@ -280,6 +280,10 @@ Use the PS5 version for Windows PowerShell 5.1 and the PS7 version for PowerShel
 
 This project is an external editor for Sentient Sands data. It is not Kenshi itself and does not replace the original mod or its compiled game-side components.
 
+## Known Issues
+
+- "Create from template" button in "Create new entity" windows broken and obsolete. Use "From Template" in main window.
+
 ## Changelog
 
 v1.5

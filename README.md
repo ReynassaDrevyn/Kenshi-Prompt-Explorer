@@ -1,6 +1,6 @@
 # Kenshi Prompt Explorer
 
-`Kenshi Prompt Explorer` is a Windows PowerShell + WPF editor for the **Sentient Sands** with **KayakDB** AI mod for **Kenshi**.
+`Kenshi Prompt Explorer` is a Windows PowerShell + WPF editor for the **Sentient Sands 0.32** with **KayakDB** AI mod for **Kenshi**.
 
 It is built to make the mod's prompt and KayakDB data easier to browse, edit, duplicate, and generate without manually digging through the folder structure.
 

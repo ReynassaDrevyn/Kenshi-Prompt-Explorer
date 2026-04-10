@@ -2471,6 +2471,9 @@ function Load-ContentEntryDocument {
     $entryFiles = if ($Node.EntryFiles) { $Node.EntryFiles } else { Get-EntryFileSet -FolderPath $Node.FolderPath }
     $doc = [ordered]@{
         Type                = 'ContentEntry'
+        Path                = ''
+        RelativePath        = ''
+        FileProfile         = $null
         FolderPath          = $Node.FolderPath
         FolderRelativePath  = $Node.RelativePath
         Campaign            = $script:State.CurrentCampaign

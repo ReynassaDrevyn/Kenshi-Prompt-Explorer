@@ -282,6 +282,11 @@ This project is an external editor for Sentient Sands data. It is not Kenshi its
 
 ## Changelog
 
+v1.5
+
+- updated for SentientSands-v0.32
+- dialogue and stats tab added for entities
+
 v1.4
 
 - reworked 'Reference' system, now allows user input

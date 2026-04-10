@@ -731,7 +731,7 @@ function Get-ModeRootPath {
 
     $campaignRoot = Join-Path $Context.CampaignsRoot $Campaign
     if ($Mode -eq 'Gameplay Prompts') {
-        return (Join-Path $campaignRoot 'mandatory')
+        return $campaignRoot
     }
 
     return (Join-Path $campaignRoot 'categories')
@@ -744,10 +744,45 @@ function Get-TemplateModeRootPath {
     )
 
     if ($Mode -eq 'Gameplay Prompts') {
-        Join-Path $Context.TemplateRoot 'mandatory'
+        return $Context.TemplateRoot
     }
-    else {
-        Join-Path $Context.TemplateRoot 'categories'
+
+    return (Join-Path $Context.TemplateRoot 'categories')
+}
+
+function Get-GameplayPromptRoots {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$Campaign
+    )
+
+    $baseRoot = Get-ModeRootPath -Context $Context -Campaign $Campaign -Mode 'Gameplay Prompts'
+    $roots = [System.Collections.Generic.List[object]]::new()
+    foreach ($name in @('mandatory', 'species')) {
+        $path = Join-Path $baseRoot $name
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            $roots.Add([pscustomobject]@{
+                    Name         = $name
+                    Path         = $path
+                    RelativePath = $name
+                })
+        }
+    }
+    return @($roots)
+}
+
+function Get-EntryFileSet {
+    param([Parameter(Mandatory)][string]$FolderPath)
+
+    $entityPath = Join-Path $FolderPath 'entity.txt'
+    $dialoguePath = Join-Path $FolderPath 'dialogue.txt'
+    $statsPath = Join-Path $FolderPath 'stats.txt'
+
+    [pscustomobject]@{
+        EntityPath   = if (Test-Path -LiteralPath $entityPath -PathType Leaf) { $entityPath } else { $null }
+        DialoguePath = if (Test-Path -LiteralPath $dialoguePath -PathType Leaf) { $dialoguePath } else { $null }
+        StatsPath    = if (Test-Path -LiteralPath $statsPath -PathType Leaf) { $statsPath } else { $null }
+        HasAny       = ((Test-Path -LiteralPath $entityPath -PathType Leaf) -or (Test-Path -LiteralPath $dialoguePath -PathType Leaf) -or (Test-Path -LiteralPath $statsPath -PathType Leaf))
     }
 }
 
@@ -829,21 +864,22 @@ function Add-ContentTreeChildren {
 
     $directories = @(Get-ChildItem -LiteralPath $RootPath -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
     foreach ($dir in $directories) {
-        $entityPath = Join-Path $dir.FullName 'entity.txt'
-        if (Test-Path -LiteralPath $entityPath -PathType Leaf) {
-            $relativePath = $entityPath.Substring($BasePath.Length).TrimStart('\')
+        $entryFiles = Get-EntryFileSet -FolderPath $dir.FullName
+        if ($entryFiles.HasAny) {
+            $relativePath = $dir.FullName.Substring($BasePath.Length).TrimStart('\')
             $leafName = $dir.Name
             if (-not (Test-SearchMatch -Search $Search -Text $leafName) -and -not (Test-SearchMatch -Search $Search -Text $relativePath)) {
                 continue
             }
 
             $leaf = New-TreeItem -Header $leafName -NodeData ([pscustomobject]@{
-                    Kind         = 'EntityFile'
+                    Kind         = 'ContentEntry'
                     DisplayName  = $leafName
-                    Path         = $entityPath
+                    Path         = if ($entryFiles.EntityPath) { $entryFiles.EntityPath } elseif ($entryFiles.DialoguePath) { $entryFiles.DialoguePath } else { $entryFiles.StatsPath }
                     RelativePath = $relativePath
                     CategoryName = ($relativePath -split '\\')[0]
                     FolderPath   = $dir.FullName
+                    EntryFiles   = $entryFiles
                 })
             $TargetCollection.Add($leaf) | Out-Null
             continue
@@ -1018,6 +1054,31 @@ function Get-SiblingEntityPath {
     return $null
 }
 
+function Get-SiblingEntryFilePath {
+    param([Parameter(Mandatory)][string]$CurrentFilePath)
+
+    $entryFolder = Split-Path -Path $CurrentFilePath -Parent
+    $parentFolder = Split-Path -Path $entryFolder -Parent
+    $fileName = Split-Path -Path $CurrentFilePath -Leaf
+    if (-not $parentFolder -or -not (Test-Path -LiteralPath $parentFolder -PathType Container)) {
+        return $null
+    }
+
+    $siblings = Get-ChildItem -LiteralPath $parentFolder -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            -not $_.FullName.Equals($entryFolder, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName $fileName) -PathType Leaf)
+        } |
+        Sort-Object Name
+
+    $first = $siblings | Select-Object -First 1
+    if ($first) {
+        return (Join-Path $first.FullName $fileName)
+    }
+
+    return $null
+}
+
 function Get-ReferenceTextForDocument {
     param(
         [Parameter(Mandatory)]$Context,
@@ -1049,11 +1110,20 @@ function Get-ReferenceTextForDocument {
     }
 
     if (-not $referencePath) {
-        if ($Document.Type -like 'Entity*') {
+        if ($Document.Type -like 'Entity*' -or ($Document.Type -eq 'ContentEntry' -and $Document.ActiveTab -eq 'Entity')) {
             $referencePath = Get-SiblingEntityPath -EntityPath $Document.Path -ModeRoot $modeRoot
             if (-not $referencePath) {
                 $templateCandidate = Join-Path $templateRoot $Document.RelativePath
                 $referencePath = Get-SiblingEntityPath -EntityPath $templateCandidate -ModeRoot $templateRoot
+            }
+        }
+        elseif ($Document.Type -eq 'ContentEntry' -and $Document.ActiveTab -in @('Dialogue', 'Stats')) {
+            $referencePath = Get-SiblingEntryFilePath -CurrentFilePath $Document.Path
+            if (-not $referencePath) {
+                $templateCandidate = Join-Path $templateRoot $Document.RelativePath
+                if (Test-Path -LiteralPath $templateCandidate -PathType Leaf) {
+                    $referencePath = $templateCandidate
+                }
             }
         }
         else {
@@ -1168,9 +1238,9 @@ function Build-AiPromptText {
         [Parameter(Mandatory)][string]$UserInstructions
     )
 
-    if ($Document.Type -eq 'Mandatory') {
+    if ($Document.Type -eq 'Mandatory' -or ($Document.Type -eq 'ContentEntry' -and $Document.ActiveTab -in @('Dialogue', 'Stats'))) {
 @"
-Generate a Sentient Sands mandatory prompt file.
+Generate a Sentient Sands text file.
 
 Target relative path:
 $($Document.RelativePath)
@@ -1608,7 +1678,19 @@ function Show-TemplatePickerDialog {
         $sourceRoot = Get-ModeRootPath -Context $Context -Campaign $selectedWorkspace -Mode $selectedMode
         $search = $searchBox.Text.Trim()
         if ($selectedMode -eq 'Gameplay Prompts') {
-            Add-MandatoryTreeChildren -RootPath $sourceRoot -BasePath $sourceRoot -TargetCollection $tree.Items -Search $search
+            foreach ($rootInfo in @(Get-GameplayPromptRoots -Context $Context -Campaign $selectedWorkspace)) {
+                $item = New-TreeItem -Header $rootInfo.Name -NodeData ([pscustomobject]@{
+                        Kind         = 'Folder'
+                        DisplayName  = $rootInfo.Name
+                        Path         = $rootInfo.Path
+                        RelativePath = $rootInfo.RelativePath
+                    })
+                Add-MandatoryTreeChildren -RootPath $rootInfo.Path -BasePath $sourceRoot -TargetCollection $item.Items -Search $search
+                $folderMatches = (Test-SearchMatch -Search $search -Text $rootInfo.Name) -or (Test-SearchMatch -Search $search -Text $rootInfo.RelativePath)
+                if ($item.Items.Count -gt 0 -or $folderMatches -or -not $search) {
+                    $tree.Items.Add($item) | Out-Null
+                }
+            }
         }
         else {
             Add-ContentTreeChildren -RootPath $sourceRoot -BasePath $sourceRoot -TargetCollection $tree.Items -Search $search
@@ -1636,7 +1718,7 @@ function Show-TemplatePickerDialog {
         }
 
         $selectedMode = [string]$modeCombo.SelectedItem
-        $expectedKind = if ($selectedMode -eq 'Gameplay Prompts') { 'MandatoryFile' } else { 'EntityFile' }
+        $expectedKind = if ($selectedMode -eq 'Gameplay Prompts') { 'MandatoryFile' } else { 'ContentEntry' }
         if ($selected.Tag.Kind -ne $expectedKind) {
             Show-Message -Message 'Select a template file or entity, not a folder.' -Icon Warning | Out-Null
             return
@@ -1683,7 +1765,12 @@ if ($SelfTest) {
 
     $tree = [System.Windows.Controls.TreeView]::new()
     $mandatoryRoot = Get-ModeRootPath -Context $ctx -Campaign $ctx.ActiveCampaign -Mode 'Gameplay Prompts'
-    Add-MandatoryTreeChildren -RootPath $mandatoryRoot -BasePath $mandatoryRoot -TargetCollection $tree.Items -Search ''
+    foreach ($rootInfo in @(Get-GameplayPromptRoots -Context $ctx -Campaign $ctx.ActiveCampaign)) {
+        $item = [System.Windows.Controls.TreeViewItem]::new()
+        $item.Header = $rootInfo.Name
+        Add-MandatoryTreeChildren -RootPath $rootInfo.Path -BasePath $mandatoryRoot -TargetCollection $item.Items -Search ''
+        $tree.Items.Add($item) | Out-Null
+    }
     Write-Output ("MANDATORY_TREE_ROOT_ITEMS={0}" -f $tree.Items.Count)
     $tree.Items.Clear()
 
@@ -1866,10 +1953,26 @@ if ($SelfTest) {
           <TextBlock x:Name="EditorHeaderText" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12"/>
           <Grid Grid.Row="1">
             <TextBox x:Name="MandatoryEditor" AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code" Visibility="Collapsed"/>
-            <ScrollViewer x:Name="StructuredEditorScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
-              <StackPanel x:Name="StructuredEditorPanel"/>
-            </ScrollViewer>
-            <TextBox x:Name="RawEntityEditor" AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code" Visibility="Collapsed"/>
+            <TabControl x:Name="ContentTabs" Visibility="Collapsed" Background="#FFFFFF" BorderBrush="#D7DEE9" Foreground="#111827">
+              <TabItem x:Name="EntityTab" Header="Entity">
+                <Grid Margin="8">
+                  <ScrollViewer x:Name="StructuredEditorScroll" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="StructuredEditorPanel"/>
+                  </ScrollViewer>
+                  <TextBox x:Name="RawEntityEditor" AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code" Visibility="Collapsed"/>
+                </Grid>
+              </TabItem>
+              <TabItem x:Name="DialogueTab" Header="Dialogue" Visibility="Collapsed">
+                <Grid Margin="8">
+                  <TextBox x:Name="DialogueEditor" AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code"/>
+                </Grid>
+              </TabItem>
+              <TabItem x:Name="StatsTab" Header="Stats" Visibility="Collapsed">
+                <Grid Margin="8">
+                  <TextBox x:Name="StatsEditor" AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="Wrap" FontFamily="Cascadia Code"/>
+                </Grid>
+              </TabItem>
+            </TabControl>
             <TextBlock x:Name="EmptyStateText" Text="Open a mod folder, choose a campaign, then select a file or entity." Foreground="#64748B" FontSize="18" VerticalAlignment="Center" HorizontalAlignment="Center"/>
           </Grid>
         </Grid>
@@ -1931,7 +2034,7 @@ foreach ($name in @(
         'NewCategoryLabel', 'NewCategoryCombo',
         'ExpandAllButton', 'CollapseAllButton',
         'NewButton', 'CreateFromTemplateButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
-        'EditorHeaderText', 'MandatoryEditor', 'StructuredEditorScroll', 'StructuredEditorPanel', 'RawEntityEditor',
+        'EditorHeaderText', 'MandatoryEditor', 'ContentTabs', 'EntityTab', 'DialogueTab', 'StatsTab', 'StructuredEditorScroll', 'StructuredEditorPanel', 'RawEntityEditor', 'DialogueEditor', 'StatsEditor',
         'EmptyStateText', 'MetadataText', 'PreviewTextBox', 'ReferenceTextBox', 'TemplateReferenceCheckBox',
         'AiInstructionsBox', 'AiDraftTextBox', 'StatusText'
     )) {
@@ -1947,6 +2050,7 @@ $script:State = [ordered]@{
     SuspendEditorEvents = $false
     SuspendUiEvents     = $false
     SuspendReferenceEvents = $false
+    SuspendTabEvents    = $false
     LastStatus          = 'Ready.'
 }
 
@@ -2000,6 +2104,19 @@ function Get-CurrentEditorText {
 
     switch ($script:State.CurrentDocument.Type) {
         'Mandatory' { return $Controls.MandatoryEditor.Text }
+        'ContentEntry' {
+            switch ($script:State.CurrentDocument.ActiveTab) {
+                'Entity' {
+                    if ($script:State.CurrentDocument.EntityTabType -eq 'EntityRaw') {
+                        return $Controls.RawEntityEditor.Text
+                    }
+                    return (Render-EntityDocument -Document $script:State.CurrentDocument.Entity)
+                }
+                'Dialogue' { return $Controls.DialogueEditor.Text }
+                'Stats' { return $Controls.StatsEditor.Text }
+                default { return '' }
+            }
+        }
         'EntityRaw' { return $Controls.RawEntityEditor.Text }
         'EntityStructured' { return (Render-EntityDocument -Document $script:State.CurrentDocument.Entity) }
         default { return '' }
@@ -2030,7 +2147,7 @@ function Update-PreviewAndReference {
         $metadata += "NewLine: " + ($doc.FileProfile.NewLine.Replace("`r", '\r').Replace("`n", '\n'))
         $metadata += "UTF8 BOM: " + [string]$doc.FileProfile.HasUtf8Bom
     }
-    if ($doc.Type -eq 'EntityRaw' -and $doc.Entity) {
+    if ((($doc.Type -eq 'EntityRaw') -or ($doc.Type -eq 'ContentEntry' -and $doc.ActiveTab -eq 'Entity' -and $doc.EntityTabType -eq 'EntityRaw')) -and $doc.Entity) {
         $metadata += 'Structured editing disabled because the file contains unsupported free text or missing header lines.'
     }
     $Controls.MetadataText.Text = ($metadata -join '    ')
@@ -2052,6 +2169,7 @@ function Update-PreviewAndReference {
 function Show-EmptyEditor {
     $Controls.EmptyStateText.Visibility = 'Visible'
     $Controls.MandatoryEditor.Visibility = 'Collapsed'
+    $Controls.ContentTabs.Visibility = 'Collapsed'
     $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
     $Controls.RawEntityEditor.Visibility = 'Collapsed'
     $Controls.EditorHeaderText.Text = ''
@@ -2170,14 +2288,24 @@ function Add-StructuredTextBox {
 }
 
 function Render-StructuredEditor {
-    if (-not $script:State.CurrentDocument -or $script:State.CurrentDocument.Type -ne 'EntityStructured') {
+    param($DocumentOverride)
+
+    $document = if ($DocumentOverride) {
+        $DocumentOverride
+    }
+    elseif ($script:State.CurrentDocument.Type -eq 'EntityStructured') {
+        $script:State.CurrentDocument.Entity
+    }
+    elseif ($script:State.CurrentDocument.Type -eq 'ContentEntry' -and $script:State.CurrentDocument.EntityTabType -eq 'EntityStructured') {
+        $script:State.CurrentDocument.Entity
+    }
+    else {
         return
     }
 
     $script:State.SuspendEditorEvents = $true
     $panel = $Controls.StructuredEditorPanel
     $panel.Children.Clear()
-    $document = $script:State.CurrentDocument.Entity
 
     $headerGroup = [System.Windows.Controls.GroupBox]::new()
     $headerGroup.Header = 'Header'
@@ -2287,6 +2415,7 @@ function Load-MandatoryDocument {
     }
     $script:State.SuspendEditorEvents = $true
     $Controls.EmptyStateText.Visibility = 'Collapsed'
+    $Controls.ContentTabs.Visibility = 'Collapsed'
     $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
     $Controls.RawEntityEditor.Visibility = 'Collapsed'
     $Controls.MandatoryEditor.Visibility = 'Visible'
@@ -2298,43 +2427,143 @@ function Load-MandatoryDocument {
     Update-PreviewAndReference
 }
 
-function Load-EntityDocument {
+function Set-CurrentContentTab {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Entity', 'Dialogue', 'Stats')][string]$TabName,
+        [switch]$SkipRefresh
+    )
+
+    $doc = $script:State.CurrentDocument
+    if (-not $doc -or $doc.Type -ne 'ContentEntry') {
+        return
+    }
+
+    $doc.ActiveTab = $TabName
+    switch ($TabName) {
+        'Entity' {
+            $doc.Path = $doc.EntryFiles.EntityPath
+            $doc.RelativePath = $doc.EntityRelativePath
+            $doc.FileProfile = $doc.EntityFileProfile
+            $Controls.EditorHeaderText.Text = "$($doc.FolderRelativePath)  [entity]"
+        }
+        'Dialogue' {
+            $doc.Path = $doc.EntryFiles.DialoguePath
+            $doc.RelativePath = $doc.DialogueRelativePath
+            $doc.FileProfile = $doc.DialogueFileProfile
+            $Controls.EditorHeaderText.Text = "$($doc.FolderRelativePath)  [dialogue]"
+        }
+        'Stats' {
+            $doc.Path = $doc.EntryFiles.StatsPath
+            $doc.RelativePath = $doc.StatsRelativePath
+            $doc.FileProfile = $doc.StatsFileProfile
+            $Controls.EditorHeaderText.Text = "$($doc.FolderRelativePath)  [stats]"
+        }
+    }
+
+    if (-not $SkipRefresh) {
+        Update-PreviewAndReference
+    }
+}
+
+function Load-ContentEntryDocument {
     param([Parameter(Mandatory)]$Node)
 
-    $fileProfile = Read-TextFileDetailed -Path $Node.Path
-    $entity = Parse-EntityDocument -Content $fileProfile.Content
-    $common = [ordered]@{
-        Path         = $Node.Path
-        RelativePath = $Node.RelativePath
-        Campaign     = $script:State.CurrentCampaign
-        FileProfile  = $fileProfile
-        Entity       = $entity
+    $entryFiles = if ($Node.EntryFiles) { $Node.EntryFiles } else { Get-EntryFileSet -FolderPath $Node.FolderPath }
+    $doc = [ordered]@{
+        Type                = 'ContentEntry'
+        FolderPath          = $Node.FolderPath
+        FolderRelativePath  = $Node.RelativePath
+        Campaign            = $script:State.CurrentCampaign
+        EntryFiles          = $entryFiles
         ManualReferenceText = ''
+        ActiveTab           = ''
     }
 
+    $script:State.SuspendEditorEvents = $true
+    $script:State.SuspendTabEvents = $true
     $Controls.EmptyStateText.Visibility = 'Collapsed'
     $Controls.MandatoryEditor.Visibility = 'Collapsed'
+    $Controls.ContentTabs.Visibility = 'Visible'
     $Controls.AiDraftTextBox.Text = ''
 
-    if ($entity.CanRoundTripStructured) {
-        $script:State.CurrentDocument = [pscustomobject]($common + @{ Type = 'EntityStructured' })
-        $Controls.RawEntityEditor.Visibility = 'Collapsed'
-        $Controls.StructuredEditorScroll.Visibility = 'Visible'
-        $Controls.EditorHeaderText.Text = $Node.RelativePath
-        Render-StructuredEditor
+    if ($entryFiles.EntityPath) {
+        $entityFileProfile = Read-TextFileDetailed -Path $entryFiles.EntityPath
+        $entity = Parse-EntityDocument -Content $entityFileProfile.Content
+        $doc.EntityFileProfile = $entityFileProfile
+        $doc.Entity = $entity
+        $doc.EntityRelativePath = $entryFiles.EntityPath.Substring((Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts').Length).TrimStart('\')
+        $doc.EntityTabType = if ($entity.CanRoundTripStructured) { 'EntityStructured' } else { 'EntityRaw' }
+        $Controls.EntityTab.Visibility = 'Visible'
+        if ($entity.CanRoundTripStructured) {
+            $Controls.RawEntityEditor.Visibility = 'Collapsed'
+            $Controls.StructuredEditorScroll.Visibility = 'Visible'
+            Render-StructuredEditor -DocumentOverride $entity
+        }
+        else {
+            $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
+            $Controls.RawEntityEditor.Visibility = 'Visible'
+            $Controls.RawEntityEditor.Text = $entityFileProfile.Content
+        }
     }
     else {
-        $script:State.CurrentDocument = [pscustomobject]($common + @{ Type = 'EntityRaw' })
-        $script:State.SuspendEditorEvents = $true
+        $Controls.EntityTab.Visibility = 'Collapsed'
         $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
-        $Controls.RawEntityEditor.Visibility = 'Visible'
-        $Controls.RawEntityEditor.Text = $fileProfile.Content
-        $Controls.EditorHeaderText.Text = "$($Node.RelativePath)  [raw mode]"
-        $script:State.SuspendEditorEvents = $false
+        $Controls.RawEntityEditor.Visibility = 'Collapsed'
     }
 
+    if ($entryFiles.DialoguePath) {
+        $dialogueFileProfile = Read-TextFileDetailed -Path $entryFiles.DialoguePath
+        $doc.DialogueFileProfile = $dialogueFileProfile
+        $doc.DialogueRelativePath = $entryFiles.DialoguePath.Substring((Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts').Length).TrimStart('\')
+        $Controls.DialogueEditor.Text = $dialogueFileProfile.Content
+        $Controls.DialogueTab.Visibility = 'Visible'
+    }
+    else {
+        $Controls.DialogueEditor.Text = ''
+        $Controls.DialogueTab.Visibility = 'Collapsed'
+    }
+
+    if ($entryFiles.StatsPath) {
+        $statsFileProfile = Read-TextFileDetailed -Path $entryFiles.StatsPath
+        $doc.StatsFileProfile = $statsFileProfile
+        $doc.StatsRelativePath = $entryFiles.StatsPath.Substring((Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts').Length).TrimStart('\')
+        $Controls.StatsEditor.Text = $statsFileProfile.Content
+        $Controls.StatsTab.Visibility = 'Visible'
+    }
+    else {
+        $Controls.StatsEditor.Text = ''
+        $Controls.StatsTab.Visibility = 'Collapsed'
+    }
+
+    $script:State.CurrentDocument = [pscustomobject]$doc
+    if ($Controls.EntityTab.Visibility -eq 'Visible') {
+        $Controls.ContentTabs.SelectedItem = $Controls.EntityTab
+        Set-CurrentContentTab -TabName 'Entity' -SkipRefresh
+    }
+    elseif ($Controls.DialogueTab.Visibility -eq 'Visible') {
+        $Controls.ContentTabs.SelectedItem = $Controls.DialogueTab
+        Set-CurrentContentTab -TabName 'Dialogue' -SkipRefresh
+    }
+    elseif ($Controls.StatsTab.Visibility -eq 'Visible') {
+        $Controls.ContentTabs.SelectedItem = $Controls.StatsTab
+        Set-CurrentContentTab -TabName 'Stats' -SkipRefresh
+    }
+
+    $script:State.SuspendTabEvents = $false
+    $script:State.SuspendEditorEvents = $false
     Set-Dirty -Value $false
     Update-PreviewAndReference
+}
+
+function Load-EntityDocument {
+    param([Parameter(Mandatory)]$Node)
+    $folderPath = if ($Node.FolderPath) { $Node.FolderPath } else { Split-Path -Path $Node.Path -Parent }
+    $folderRelativePath = if ($Node.FolderPath) { $Node.RelativePath } else { (Split-Path -Path $Node.RelativePath -Parent) }
+    Load-ContentEntryDocument -Node ([pscustomobject]@{
+            FolderPath   = $folderPath
+            RelativePath = $folderRelativePath
+            EntryFiles   = (Get-EntryFileSet -FolderPath $folderPath)
+        })
 }
 
 function Open-TreeNode {
@@ -2347,6 +2576,7 @@ function Open-TreeNode {
     switch ($Node.Kind) {
         'MandatoryFile' { Load-MandatoryDocument -Node $Node }
         'EntityFile' { Load-EntityDocument -Node $Node }
+        'ContentEntry' { Load-ContentEntryDocument -Node $Node }
         default {
             $script:State.CurrentDocument = $null
             Show-EmptyEditor
@@ -2372,16 +2602,28 @@ function Refresh-Tree {
         return
     }
 
-    $root = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode $script:State.CurrentMode
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-        return
-    }
-
     $search = $Controls.SearchBox.Text.Trim()
     if ($script:State.CurrentMode -eq 'Gameplay Prompts') {
-        Add-MandatoryTreeChildren -RootPath $root -BasePath $root -TargetCollection $Controls.PromptTree.Items -Search $search
+        $baseRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Gameplay Prompts'
+        foreach ($rootInfo in @(Get-GameplayPromptRoots -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign)) {
+            $item = New-TreeItem -Header $rootInfo.Name -NodeData ([pscustomobject]@{
+                    Kind         = 'Folder'
+                    DisplayName  = $rootInfo.Name
+                    Path         = $rootInfo.Path
+                    RelativePath = $rootInfo.RelativePath
+                })
+            Add-MandatoryTreeChildren -RootPath $rootInfo.Path -BasePath $baseRoot -TargetCollection $item.Items -Search $search
+            $folderMatches = (Test-SearchMatch -Search $search -Text $rootInfo.Name) -or (Test-SearchMatch -Search $search -Text $rootInfo.RelativePath)
+            if ($item.Items.Count -gt 0 -or $folderMatches -or -not $search) {
+                $Controls.PromptTree.Items.Add($item) | Out-Null
+            }
+        }
     }
     else {
+        $root = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode $script:State.CurrentMode
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            return
+        }
         Add-ContentTreeChildren -RootPath $root -BasePath $root -TargetCollection $Controls.PromptTree.Items -Search $search
     }
 
@@ -2479,6 +2721,12 @@ function Get-CurrentContentCategoryRoot {
     if ($selected) {
         switch ($selected.Kind) {
             'EntityFile' {
+                $folderPath = Split-Path -Path $selected.FolderPath -Parent
+                if ($folderPath) {
+                    return $folderPath
+                }
+            }
+            'ContentEntry' {
                 $folderPath = Split-Path -Path $selected.FolderPath -Parent
                 if ($folderPath) {
                     return $folderPath
@@ -2722,12 +2970,13 @@ function Copy-TemplateItemToWorkspace {
     $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
     Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
     Open-TreeNode -Node ([pscustomobject]@{
-        Kind         = 'EntityFile'
+        Kind         = 'ContentEntry'
         DisplayName  = $folderName
         Path         = $targetPath
-        RelativePath = $targetPath.Substring($modeRoot.Length).TrimStart('\')
+        RelativePath = $targetFolder.Substring($modeRoot.Length).TrimStart('\')
         CategoryName = $sourceCategory
         FolderPath   = $targetFolder
+        EntryFiles   = (Get-EntryFileSet -FolderPath $targetFolder)
     })
     Set-Dirty -Value $true
     Set-Status -Text "Created template copy: $targetPath"
@@ -2742,7 +2991,7 @@ function Get-CurrentMandatoryTargetFolder {
             'Folder' { return $selected.Path }
         }
     }
-    return $modeRoot
+    return (Join-Path $modeRoot 'mandatory')
 }
 
 function Get-NextMandatoryFileName {
@@ -2797,10 +3046,11 @@ function Delete-CurrentDocument {
             Set-Dirty -Value $false
             Set-Status -Text "Deleted: $targetPath"
         }
-        { $_ -in @('EntityRaw', 'EntityStructured') } {
-            $targetFolder = Split-Path -Path $doc.Path -Parent
+        { $_ -in @('EntityRaw', 'EntityStructured', 'ContentEntry') } {
+            $targetFolder = if ($doc.Type -eq 'ContentEntry') { $doc.FolderPath } else { Split-Path -Path $doc.Path -Parent }
             Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $targetFolder
-            $result = Show-Message -Message ("Delete entry '{0}'?" -f $doc.RelativePath) -Buttons YesNo -Icon Warning
+            $label = if ($doc.Type -eq 'ContentEntry') { $doc.FolderRelativePath } else { $doc.RelativePath }
+            $result = Show-Message -Message ("Delete entry '{0}'?" -f $label) -Buttons YesNo -Icon Warning
             if ($result -ne [System.Windows.MessageBoxResult]::Yes) {
                 return
             }
@@ -2839,7 +3089,7 @@ function Save-CurrentDocument {
             }
         }
         else {
-            $currentFolder = Split-Path -Path $doc.Path -Parent
+            $currentFolder = if ($doc.Type -eq 'ContentEntry') { $doc.FolderPath } else { Split-Path -Path $doc.Path -Parent }
             $parentFolder = Split-Path -Path $currentFolder -Parent
             $dialog = Show-NewEntityDialog -Title 'Save Entity As' -Category $doc.Entity.Header['Category'] -FolderName (Split-Path -Path $currentFolder -Leaf) -DisplayName $doc.Entity.Fields['display_name'] -EntryId $doc.Entity.Header['Id']
             if (-not $dialog) {
@@ -2848,17 +3098,47 @@ function Save-CurrentDocument {
             $newFolder = Join-Path $parentFolder $dialog.FolderName
             Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $newFolder
             $targetPath = Join-Path $newFolder 'entity.txt'
-            if ((Test-Path -LiteralPath $targetPath) -and -not $targetPath.Equals($doc.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ((Test-Path -LiteralPath $targetPath) -and -not $targetPath.Equals((Join-Path $currentFolder 'entity.txt'), [System.StringComparison]::OrdinalIgnoreCase)) {
                 Show-Message -Message 'That entity already exists.' -Icon Warning | Out-Null
                 return
             }
             [System.IO.Directory]::CreateDirectory($newFolder) | Out-Null
-            if ($doc.Type -eq 'EntityStructured') {
+            if ($doc.Type -eq 'EntityStructured' -or $doc.Type -eq 'ContentEntry') {
                 $doc.Entity.Header['Name'] = $dialog.FolderName
                 $doc.Entity.Header['Id'] = $dialog.EntryId
                 if ($doc.Entity.Fields.Contains('display_name')) {
                     $doc.Entity.Fields['display_name'] = $dialog.DisplayName
                 }
+            }
+
+            if ($doc.Type -eq 'ContentEntry') {
+                if ($doc.EntryFiles.EntityPath) {
+                    Write-TextFileDetailed -Path (Join-Path $newFolder 'entity.txt') -Content (Render-EntityDocument -Document $doc.Entity) -FileProfile $doc.EntityFileProfile
+                }
+                if ($doc.EntryFiles.DialoguePath) {
+                    $dialogueContent = if ($doc.ActiveTab -eq 'Dialogue') { $Controls.DialogueEditor.Text } else { $doc.DialogueFileProfile.Content }
+                    Write-TextFileDetailed -Path (Join-Path $newFolder 'dialogue.txt') -Content $dialogueContent -FileProfile $doc.DialogueFileProfile
+                }
+                if ($doc.EntryFiles.StatsPath) {
+                    $statsContent = if ($doc.ActiveTab -eq 'Stats') { $Controls.StatsEditor.Text } else { $doc.StatsFileProfile.Content }
+                    Write-TextFileDetailed -Path (Join-Path $newFolder 'stats.txt') -Content $statsContent -FileProfile $doc.StatsFileProfile
+                }
+
+                $modeRoot = Get-ModeRootPath -Context $script:State.ModContext -Campaign $script:State.CurrentCampaign -Mode 'Content Prompts'
+                $targetFolder = $newFolder
+                Refresh-Tree -PreserveState -RevealRelativePath ($targetFolder.Substring($modeRoot.Length).TrimStart('\'))
+                Open-TreeNode -Node ([pscustomobject]@{
+                        Kind         = 'ContentEntry'
+                        DisplayName  = (Split-Path -Path $newFolder -Leaf)
+                        Path         = $targetPath
+                        RelativePath = $targetFolder.Substring($modeRoot.Length).TrimStart('\')
+                        CategoryName = (($targetFolder.Substring($modeRoot.Length).TrimStart('\')) -split '\\')[0]
+                        FolderPath   = $targetFolder
+                        EntryFiles   = (Get-EntryFileSet -FolderPath $targetFolder)
+                    })
+                Set-Dirty -Value $false
+                Set-Status -Text "Saved: $newFolder"
+                return
             }
         }
     }
@@ -2867,6 +3147,15 @@ function Save-CurrentDocument {
     $content = Get-CurrentEditorText
     $outputProfile = if ($doc.FileProfile) { $doc.FileProfile } else { [pscustomobject]@{ NewLine = [Environment]::NewLine; Encoding = (New-Utf8Encoding); HasUtf8Bom = $false } }
     Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $outputProfile
+
+    if ($doc.Type -eq 'ContentEntry') {
+        $doc.FileProfile.Content = $content
+        switch ($doc.ActiveTab) {
+            'Dialogue' { $doc.DialogueFileProfile.Content = $content }
+            'Stats' { $doc.StatsFileProfile.Content = $content }
+            'Entity' { $doc.EntityFileProfile.Content = $content }
+        }
+    }
 
     if ($SaveAs) {
         Refresh-Tree -PreserveState
@@ -2994,12 +3283,13 @@ function New-Document {
         Write-TextFileDetailed -Path $targetPath -Content $content -FileProfile $newEntityProfile
         Refresh-Tree -PreserveState -RevealRelativePath ($targetPath.Substring($modeRoot.Length).TrimStart('\'))
         Open-TreeNode -Node ([pscustomobject]@{
-            Kind         = 'EntityFile'
+            Kind         = 'ContentEntry'
             DisplayName  = $dialog.FolderName
             Path         = $targetPath
-            RelativePath = $targetPath.Substring($modeRoot.Length).TrimStart('\')
+            RelativePath = $targetFolder.Substring($modeRoot.Length).TrimStart('\')
             CategoryName = $category
             FolderPath   = $targetFolder
+            EntryFiles   = (Get-EntryFileSet -FolderPath $targetFolder)
         })
         Set-Dirty -Value $true
         Set-Status -Text "Created new entity: $targetPath"
@@ -3050,6 +3340,30 @@ function Apply-AiDraft {
     switch ($script:State.CurrentDocument.Type) {
         'Mandatory' {
             $Controls.MandatoryEditor.Text = $draft
+        }
+        'ContentEntry' {
+            switch ($script:State.CurrentDocument.ActiveTab) {
+                'Dialogue' { $Controls.DialogueEditor.Text = $draft }
+                'Stats' { $Controls.StatsEditor.Text = $draft }
+                default {
+                    $parsed = Parse-EntityDocument -Content $draft
+                    if ($parsed.CanRoundTripStructured) {
+                        $script:State.CurrentDocument.Entity = $parsed
+                        $script:State.CurrentDocument.EntityTabType = 'EntityStructured'
+                        $Controls.StructuredEditorScroll.Visibility = 'Visible'
+                        $Controls.RawEntityEditor.Visibility = 'Collapsed'
+                        Render-StructuredEditor -DocumentOverride $parsed
+                    }
+                    else {
+                        Show-Message -Message 'The AI draft does not round-trip as a structured entity. It will be applied to raw mode instead.' -Icon Warning | Out-Null
+                        $script:State.CurrentDocument.EntityTabType = 'EntityRaw'
+                        $Controls.StructuredEditorScroll.Visibility = 'Collapsed'
+                        $Controls.RawEntityEditor.Visibility = 'Visible'
+                        $Controls.RawEntityEditor.Text = $draft
+                        $Controls.EditorHeaderText.Text = "$($script:State.CurrentDocument.FolderRelativePath)  [entity raw]"
+                    }
+                }
+            }
         }
         'EntityRaw' {
             $Controls.RawEntityEditor.Text = $draft
@@ -3265,6 +3579,43 @@ $Controls.RawEntityEditor.Add_TextChanged({
     }
     Set-Dirty -Value $true
     Update-PreviewAndReference
+})
+
+$Controls.DialogueEditor.Add_TextChanged({
+    if ($script:State.SuspendEditorEvents -or -not $script:State.CurrentDocument) {
+        return
+    }
+    if ($script:State.CurrentDocument.Type -ne 'ContentEntry') {
+        return
+    }
+    Set-Dirty -Value $true
+    Update-PreviewAndReference
+})
+
+$Controls.StatsEditor.Add_TextChanged({
+    if ($script:State.SuspendEditorEvents -or -not $script:State.CurrentDocument) {
+        return
+    }
+    if ($script:State.CurrentDocument.Type -ne 'ContentEntry') {
+        return
+    }
+    Set-Dirty -Value $true
+    Update-PreviewAndReference
+})
+
+$Controls.ContentTabs.Add_SelectionChanged({
+    if ($script:State.SuspendTabEvents -or -not $script:State.CurrentDocument -or $script:State.CurrentDocument.Type -ne 'ContentEntry') {
+        return
+    }
+    if ($Controls.ContentTabs.SelectedItem -eq $Controls.EntityTab) {
+        Set-CurrentContentTab -TabName 'Entity'
+    }
+    elseif ($Controls.ContentTabs.SelectedItem -eq $Controls.DialogueTab) {
+        Set-CurrentContentTab -TabName 'Dialogue'
+    }
+    elseif ($Controls.ContentTabs.SelectedItem -eq $Controls.StatsTab) {
+        Set-CurrentContentTab -TabName 'Stats'
+    }
 })
 
 $Controls.TemplateReferenceCheckBox.Add_Click({

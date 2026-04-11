@@ -1607,6 +1607,1090 @@ function Show-OpenFilePicker {
     return $null
 }
 
+function Get-BatchWorkspaceNames {
+    param([Parameter(Mandatory)]$Context)
+
+    $names = [System.Collections.Generic.List[string]]::new()
+    $names.Add((Get-TemplateWorkspaceName))
+    foreach ($campaign in @($Context.Campaigns)) {
+        $names.Add([string]$campaign.Name)
+    }
+    return @($names)
+}
+
+function Get-BatchRootOptions {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$Campaign,
+        [Parameter(Mandatory)][ValidateSet('Gameplay Prompts', 'Content Prompts')][string]$Mode
+    )
+
+    $options = [System.Collections.Generic.List[object]]::new()
+    if ($Mode -eq 'Gameplay Prompts') {
+        foreach ($rootInfo in @(Get-GameplayPromptRoots -Context $Context -Campaign $Campaign)) {
+            $options.Add([pscustomobject]@{
+                    Name         = [string]$rootInfo.Name
+                    Path         = [string]$rootInfo.Path
+                    RelativePath = [string]$rootInfo.RelativePath
+                    Campaign     = $Campaign
+                    Mode         = $Mode
+                })
+        }
+        return @($options)
+    }
+
+    $modeRoot = Get-ModeRootPath -Context $Context -Campaign $Campaign -Mode $Mode
+    foreach ($dir in @(Get-ChildItem -LiteralPath $modeRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $options.Add([pscustomobject]@{
+                Name         = [string]$dir.Name
+                Path         = [string]$dir.FullName
+                RelativePath = [string]$dir.Name
+                Campaign     = $Campaign
+                Mode         = $Mode
+            })
+    }
+    return @($options)
+}
+
+function Get-BatchSelectableItems {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$Campaign,
+        [Parameter(Mandatory)][ValidateSet('Gameplay Prompts', 'Content Prompts')][string]$Mode,
+        $RootOption,
+        [string]$Search
+    )
+
+    if (-not $RootOption -or -not (Test-Path -LiteralPath $RootOption.Path -PathType Container)) {
+        return @()
+    }
+
+    $modeRoot = Get-ModeRootPath -Context $Context -Campaign $Campaign -Mode $Mode
+    $items = [System.Collections.Generic.List[object]]::new()
+    if ($Mode -eq 'Gameplay Prompts') {
+        foreach ($file in @(Get-ChildItem -LiteralPath $RootOption.Path -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+            $relativeFromRoot = $file.FullName.Substring($RootOption.Path.Length).TrimStart('\')
+            $displayName = if ($relativeFromRoot) {
+                $RootOption.Name + '\' + $relativeFromRoot
+            }
+            else {
+                $RootOption.Name + '\' + $file.Name
+            }
+            if (-not (Test-SearchMatch -Search $Search -Text $displayName) -and -not (Test-SearchMatch -Search $Search -Text $file.Name)) {
+                continue
+            }
+
+            $items.Add([pscustomobject]@{
+                    Type         = 'GameplayFile'
+                    DisplayName  = $displayName
+                    Path         = $file.FullName
+                    RelativePath = $file.FullName.Substring($modeRoot.Length).TrimStart('\')
+                    Campaign     = $Campaign
+                    Mode         = $Mode
+                    RootName     = $RootOption.Name
+                })
+        }
+        return @($items)
+    }
+
+    foreach ($dir in @(Get-ChildItem -LiteralPath $RootOption.Path -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+        $entryFiles = Get-EntryFileSet -FolderPath $dir.FullName
+        if (-not $entryFiles.HasAny) {
+            continue
+        }
+
+        $relativeFromRoot = $dir.FullName.Substring($RootOption.Path.Length).TrimStart('\')
+        $displayName = if ($relativeFromRoot) { $relativeFromRoot } else { $dir.Name }
+        if (-not (Test-SearchMatch -Search $Search -Text $displayName) -and -not (Test-SearchMatch -Search $Search -Text $dir.Name)) {
+            continue
+        }
+
+        $primaryPath = if ($entryFiles.EntityPath) {
+            $entryFiles.EntityPath
+        }
+        elseif ($entryFiles.DialoguePath) {
+            $entryFiles.DialoguePath
+        }
+        else {
+            $entryFiles.StatsPath
+        }
+
+        $items.Add([pscustomobject]@{
+                Type         = 'ContentEntry'
+                DisplayName  = $displayName
+                Path         = $primaryPath
+                RelativePath = $dir.FullName.Substring($modeRoot.Length).TrimStart('\')
+                Campaign     = $Campaign
+                Mode         = $Mode
+                CategoryName = $RootOption.Name
+                FolderPath   = $dir.FullName
+                EntryFiles   = $entryFiles
+            })
+    }
+    return @($items)
+}
+
+function Get-BatchEntityDocumentDetails {
+    param([Parameter(Mandatory)]$Item)
+
+    if (-not $Item -or $Item.Type -ne 'ContentEntry' -or -not $Item.EntryFiles -or -not $Item.EntryFiles.EntityPath) {
+        return $null
+    }
+
+    $entityFileProfile = Read-TextFileDetailed -Path $Item.EntryFiles.EntityPath
+    $entityDocument = Parse-EntityDocument -Content $entityFileProfile.Content
+    return [pscustomobject]@{
+        FileProfile = $entityFileProfile
+        Document    = $entityDocument
+    }
+}
+
+function Get-BatchContentFieldOptions {
+    param([Parameter(Mandatory)]$Items)
+
+    $fieldEntries = @{}
+    foreach ($item in @($Items)) {
+        if (-not $item -or $item.Type -ne 'ContentEntry') {
+            continue
+        }
+
+        $details = Get-BatchEntityDocumentDetails -Item $item
+        if (-not $details -or -not $details.Document -or -not $details.Document.CanRoundTripStructured) {
+            continue
+        }
+
+        $document = $details.Document
+        foreach ($key in @($document.LayoutOrder)) {
+            if (-not $document.Fields.Contains($key)) {
+                continue
+            }
+
+            $label = if ($document.FieldMeta.ContainsKey($key) -and $document.FieldMeta[$key].OriginalKey) {
+                [string]$document.FieldMeta[$key].OriginalKey
+            }
+            else {
+                [string]$key
+            }
+
+            if (-not $fieldEntries.ContainsKey($key)) {
+                $fieldEntries[$key] = [pscustomobject]@{
+                    Key   = [string]$key
+                    Label = [string]$label
+                }
+            }
+        }
+    }
+
+    return @($fieldEntries.Values | Sort-Object Label, Key)
+}
+
+function Format-BatchFieldSummary {
+    param(
+        [Parameter(Mandatory)]$Document,
+        [Parameter(Mandatory)][string[]]$FieldNames
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($fieldName in @($FieldNames)) {
+        $label = if ($Document.FieldMeta.ContainsKey($fieldName) -and $Document.FieldMeta[$fieldName].OriginalKey) {
+            [string]$Document.FieldMeta[$fieldName].OriginalKey
+        }
+        else {
+            [string]$fieldName
+        }
+        $value = if ($Document.Fields.Contains($fieldName)) { [string]$Document.Fields[$fieldName] } else { '' }
+        $lines.Add($label + ' = ' + $value)
+    }
+    return ($lines -join "`n")
+}
+
+function Get-BatchItemCurrentText {
+    param([Parameter(Mandatory)]$Item)
+
+    if ($Item.Type -eq 'GameplayFile') {
+        return (Read-TextFileDetailed -Path $Item.Path).Content
+    }
+
+    if ($Item.Type -ne 'ContentEntry') {
+        return ''
+    }
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($Item.EntryFiles.EntityPath) {
+        $details = Get-BatchEntityDocumentDetails -Item $Item
+        if ($details -and $details.Document -and $details.Document.CanRoundTripStructured) {
+            $parts.Add('[entity]')
+            $parts.Add((Render-EntityDocument -Document $details.Document))
+        }
+        elseif ($details) {
+            $parts.Add('[entity]')
+            $parts.Add($details.FileProfile.Content)
+        }
+    }
+    if ($Item.EntryFiles.DialoguePath) {
+        $parts.Add('[dialogue]')
+        $parts.Add((Read-TextFileDetailed -Path $Item.EntryFiles.DialoguePath).Content)
+    }
+    if ($Item.EntryFiles.StatsPath) {
+        $parts.Add('[stats]')
+        $parts.Add((Read-TextFileDetailed -Path $Item.EntryFiles.StatsPath).Content)
+    }
+    return ($parts -join "`n`n")
+}
+
+function Get-BatchReferenceContextText {
+    param([Parameter(Mandatory)]$Items)
+
+    $chunks = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @($Items)) {
+        if (-not $item) {
+            continue
+        }
+        $label = if ($item.RelativePath) { [string]$item.RelativePath } else { [string]$item.DisplayName }
+        $text = Get-BatchItemCurrentText -Item $item
+        if (-not $text.Trim()) {
+            continue
+        }
+        $chunks.Add('### ' + $label)
+        $chunks.Add($text)
+    }
+    return ($chunks -join "`n`n")
+}
+
+function ConvertFrom-LooseJsonHashtable {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $trimmed = $Text.Trim()
+    if (-not $trimmed) {
+        return $null
+    }
+
+    $fenceMatch = [System.Text.RegularExpressions.Regex]::Match($trimmed, '```(?:json)?\s*(.*?)\s*```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if ($fenceMatch.Success) {
+        $trimmed = $fenceMatch.Groups[1].Value.Trim()
+    }
+
+    $firstBrace = $trimmed.IndexOf('{')
+    $lastBrace = $trimmed.LastIndexOf('}')
+    if ($firstBrace -ge 0 -and $lastBrace -gt $firstBrace) {
+        $trimmed = $trimmed.Substring($firstBrace, ($lastBrace - $firstBrace + 1))
+    }
+
+    $parsed = $trimmed | ConvertFrom-Json
+    return (ConvertTo-HashtableRecursive -InputObject $parsed)
+}
+
+function Invoke-BatchAiCompletion {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$ModelKey,
+        [Parameter(Mandatory)][string]$SystemPrompt,
+        [Parameter(Mandatory)][string]$UserPrompt
+    )
+
+    $descriptor = Get-CurrentModelDescriptor -Context $Context -ModelKey $ModelKey
+    if (-not $descriptor) {
+        throw "Configured model '$ModelKey' was not found in models.json."
+    }
+    if (-not $descriptor.Provider) {
+        throw "Provider '$($descriptor.ProviderKey)' for model '$ModelKey' was not found in providers.json."
+    }
+
+    $apiKey = [string]$descriptor.Provider.api_key
+    $baseUrl = [string]$descriptor.Provider.base_url
+    if (-not $baseUrl) {
+        throw "Provider '$($descriptor.ProviderKey)' has no base_url."
+    }
+    if ((Test-PlaceholderApiKey -ApiKey $apiKey) -and $descriptor.ProviderKey -notin @('ollama', 'player2')) {
+        throw "Provider '$($descriptor.ProviderKey)' is configured with a placeholder or empty API key."
+    }
+
+    $uriBase = $baseUrl.TrimEnd('/')
+    $uri = if ($uriBase.EndsWith('/chat/completions', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $uriBase
+    }
+    else {
+        $uriBase + '/chat/completions'
+    }
+
+    $headers = @{
+        'Content-Type' = 'application/json'
+    }
+    if ($apiKey) {
+        $headers['Authorization'] = "Bearer $apiKey"
+    }
+
+    $payload = @{
+        model       = $descriptor.ModelName
+        temperature = 0.7
+        messages    = @(
+            @{
+                role    = 'system'
+                content = $SystemPrompt
+            },
+            @{
+                role    = 'user'
+                content = $UserPrompt
+            }
+        )
+    }
+
+    $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body ($payload | ConvertTo-Json -Depth 8)
+    $choice = $response.choices | Select-Object -First 1
+    if (-not $choice) {
+        throw 'No completion choices were returned by the provider.'
+    }
+
+    $content = [string]$choice.message.content
+    if (-not $content.Trim()) {
+        throw 'The provider returned an empty result.'
+    }
+
+    return $content.Trim()
+}
+
+function Build-BatchEntityAiPromptText {
+    param(
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)]$Document,
+        [Parameter(Mandatory)][string[]]$TargetFields,
+        [Parameter(Mandatory)][string]$ReferenceText,
+        [Parameter(Mandatory)][string]$UserInstructions
+    )
+
+    $fieldList = @($TargetFields | ForEach-Object { '"' + $_ + '"' }) -join ', '
+@"
+Generate updated field values for a Sentient Sands Kayak entity.
+
+Target entity:
+$($Item.RelativePath)
+
+Rules:
+- Return JSON only.
+- Return exactly one object.
+- Use exactly these keys: $fieldList
+- Each value must be a string.
+- Do not return any keys other than the selected target fields.
+- Do not include markdown fences or commentary.
+- Keep the result compatible with Kenshi / Sentient Sands tone and lore.
+
+Current entity:
+<<<CURRENT
+$(Render-EntityDocument -Document $Document)
+CURRENT
+
+Reference context:
+<<<REFERENCE
+$ReferenceText
+REFERENCE
+
+User instructions:
+$UserInstructions
+"@
+}
+
+function Build-BatchGameplayAiPromptText {
+    param(
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)][string]$CurrentText,
+        [Parameter(Mandatory)][string]$ReferenceText,
+        [Parameter(Mandatory)][string]$UserInstructions
+    )
+
+@"
+Generate an updated Sentient Sands gameplay/species prompt file.
+
+Target file:
+$($Item.RelativePath)
+
+Rules:
+- Return plain text only.
+- Return the full final file content.
+- Do not add markdown fences or commentary.
+- Keep the file consistent with neighboring Sentient Sands prompt files.
+
+Current file:
+<<<CURRENT
+$CurrentText
+CURRENT
+
+Reference context:
+<<<REFERENCE
+$ReferenceText
+REFERENCE
+
+User instructions:
+$UserInstructions
+"@
+}
+
+function Invoke-BatchEntityFieldGeneration {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$ModelKey,
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)]$Document,
+        [Parameter(Mandatory)][string[]]$TargetFields,
+        [Parameter(Mandatory)][string]$ReferenceText,
+        [Parameter(Mandatory)][string]$UserInstructions
+    )
+
+    $resultText = Invoke-BatchAiCompletion -Context $Context -ModelKey $ModelKey -SystemPrompt 'You generate only JSON field updates for Sentient Sands entities. Return only valid JSON.' -UserPrompt (Build-BatchEntityAiPromptText -Item $Item -Document $Document -TargetFields $TargetFields -ReferenceText $ReferenceText -UserInstructions $UserInstructions)
+    $parsed = ConvertFrom-LooseJsonHashtable -Text $resultText
+    if (-not $parsed) {
+        throw 'The provider did not return valid JSON for the selected fields.'
+    }
+
+    $fieldValues = @{}
+    foreach ($fieldName in @($TargetFields)) {
+        if (-not $parsed.ContainsKey($fieldName)) {
+            throw "The provider did not return the required field '$fieldName'."
+        }
+        $fieldValues[$fieldName] = [string]$parsed[$fieldName]
+    }
+    return $fieldValues
+}
+
+function Invoke-BatchGameplayFileGeneration {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$ModelKey,
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)][string]$CurrentText,
+        [Parameter(Mandatory)][string]$ReferenceText,
+        [Parameter(Mandatory)][string]$UserInstructions
+    )
+
+    return (Invoke-BatchAiCompletion -Context $Context -ModelKey $ModelKey -SystemPrompt 'You generate Sentient Sands gameplay prompt files. Return only the final plain text file content.' -UserPrompt (Build-BatchGameplayAiPromptText -Item $Item -CurrentText $CurrentText -ReferenceText $ReferenceText -UserInstructions $UserInstructions))
+}
+
+function Reload-CurrentDocumentFromDisk {
+    if (-not $script:State.CurrentDocument) {
+        return
+    }
+
+    $doc = $script:State.CurrentDocument
+    switch ($doc.Type) {
+        'Mandatory' {
+            if (Test-Path -LiteralPath $doc.Path -PathType Leaf) {
+                Open-TreeNode -Node ([pscustomobject]@{
+                        Kind         = 'MandatoryFile'
+                        Path         = $doc.Path
+                        RelativePath = $doc.RelativePath
+                    })
+            }
+        }
+        'ContentEntry' {
+            if (Test-Path -LiteralPath $doc.FolderPath -PathType Container) {
+                Open-TreeNode -Node ([pscustomobject]@{
+                        Kind         = 'ContentEntry'
+                        DisplayName  = (Split-Path -Path $doc.FolderPath -Leaf)
+                        Path         = $doc.Path
+                        RelativePath = $doc.FolderRelativePath
+                        CategoryName = if ($doc.Entity -and $doc.Entity.Header.Contains('Category')) { [string]$doc.Entity.Header['Category'] } else { '' }
+                        FolderPath   = $doc.FolderPath
+                        EntryFiles   = (Get-EntryFileSet -FolderPath $doc.FolderPath)
+                    })
+            }
+        }
+    }
+}
+
+function Apply-BatchPreviewResults {
+    param([Parameter(Mandatory)]$Results)
+
+    $appliedCount = 0
+    $failedCount = 0
+    $currentWorkspaceNeedsRefresh = $false
+    $reloadCurrentDocument = $false
+
+    foreach ($result in @($Results)) {
+        if (-not $result -or -not $result.CanApply) {
+            continue
+        }
+
+        try {
+            switch ($result.ActionType) {
+                'GameplayTextUpdate' {
+                    Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $result.Path
+                    $fileProfile = Read-TextFileDetailed -Path $result.Path
+                    Write-TextFileDetailed -Path $result.Path -Content ([string]$result.NewContent) -FileProfile $fileProfile
+                    $appliedCount++
+                    if ($script:State.CurrentMode -eq $result.Mode -and $script:State.CurrentCampaign -eq $result.Campaign) {
+                        $currentWorkspaceNeedsRefresh = $true
+                        if ($script:State.CurrentDocument -and $script:State.CurrentDocument.Path -eq $result.Path) {
+                            $reloadCurrentDocument = $true
+                        }
+                    }
+                }
+                'ContentFieldUpdate' {
+                    Assert-ChildPath -RootPath $script:State.ModContext.ModRoot -CandidatePath $result.Path
+                    $entityFileProfile = Read-TextFileDetailed -Path $result.Path
+                    $document = Parse-EntityDocument -Content $entityFileProfile.Content
+                    if (-not $document.CanRoundTripStructured) {
+                        throw "Entry '$($result.Item.DisplayName)' is not compatible with structured batch updates."
+                    }
+
+                    foreach ($fieldName in @($result.FieldValues.Keys)) {
+                        if (-not $document.Fields.Contains($fieldName)) {
+                            throw "Entry '$($result.Item.DisplayName)' does not contain field '$fieldName'."
+                        }
+                        $document.Fields[$fieldName] = [string]$result.FieldValues[$fieldName]
+                    }
+
+                    Write-TextFileDetailed -Path $result.Path -Content (Render-EntityDocument -Document $document) -FileProfile $entityFileProfile
+                    $appliedCount++
+                    if ($script:State.CurrentMode -eq $result.Mode -and $script:State.CurrentCampaign -eq $result.Campaign) {
+                        $currentWorkspaceNeedsRefresh = $true
+                        if ($script:State.CurrentDocument -and $script:State.CurrentDocument.Type -eq 'ContentEntry' -and $script:State.CurrentDocument.FolderPath -eq $result.Item.FolderPath) {
+                            $reloadCurrentDocument = $true
+                        }
+                    }
+                }
+            }
+        }
+        catch {
+            $failedCount++
+        }
+    }
+
+    if ($currentWorkspaceNeedsRefresh) {
+        Refresh-Tree -PreserveState
+        if ($reloadCurrentDocument) {
+            Reload-CurrentDocumentFromDisk
+        }
+    }
+
+    return [pscustomobject]@{
+        Applied = $appliedCount
+        Failed  = $failedCount
+    }
+}
+
+function Show-BatchToolsDialog {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [string]$InitialWorkspace,
+        [string]$InitialMode = 'Content Prompts',
+        [string]$InitialProvider,
+        [string]$InitialModel
+    )
+
+    [xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Batch Tools"
+        Width="1380"
+        Height="940"
+        MinWidth="1160"
+        MinHeight="760"
+        WindowStartupLocation="CenterOwner"
+        Background="#F8FAFC"
+        Foreground="#111827"
+        FontFamily="Segoe UI">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="230"/>
+      <RowDefinition Height="220"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,0,0,12">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="180"/>
+          <ColumnDefinition Width="180"/>
+          <ColumnDefinition Width="180"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Margin="0,0,12,0"><TextBlock Text="Operation" Margin="0,0,0,6"/><ComboBox x:Name="OperationCombo" Height="34"/></StackPanel>
+        <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock Text="Workspace" Margin="0,0,0,6"/><ComboBox x:Name="WorkspaceCombo" Height="34"/></StackPanel>
+        <StackPanel Grid.Column="2" Margin="0,0,12,0"><TextBlock Text="Mode" Margin="0,0,0,6"/><ComboBox x:Name="ModeCombo" Height="34"/></StackPanel>
+        <StackPanel Grid.Column="3"><TextBlock Text="Category / Root" Margin="0,0,0,6"/><ComboBox x:Name="RootCombo" Height="34"/></StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="1" Margin="0,0,0,12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Border Grid.Column="0" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,0,12,0">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBox x:Name="TargetSearchBox" Height="34" Margin="0,0,0,10"/>
+          <ListBox x:Name="TargetList" Grid.Row="1" SelectionMode="Extended" DisplayMemberPath="DisplayName"/>
+        </Grid>
+      </Border>
+      <Border Grid.Column="1" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock Text="Reference Inputs" FontWeight="SemiBold" Margin="0,0,0,10"/>
+          <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <ComboBox x:Name="ReferenceWorkspaceCombo" Height="34" Margin="0,0,12,0"/>
+            <ComboBox x:Name="ReferenceModeCombo" Grid.Column="1" Height="34" Margin="0,0,12,0"/>
+            <ComboBox x:Name="ReferenceRootCombo" Grid.Column="2" Height="34"/>
+          </Grid>
+          <Grid Grid.Row="2">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <TextBox x:Name="ReferenceSearchBox" Height="34" Margin="0,0,0,10"/>
+            <ListBox x:Name="ReferenceList" Grid.Row="1" SelectionMode="Extended" DisplayMemberPath="DisplayName"/>
+          </Grid>
+        </Grid>
+      </Border>
+    </Grid>
+    <Border Grid.Row="2" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,0,0,12">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <TextBlock Text="Operation Settings" FontWeight="SemiBold" Margin="0,0,0,10"/>
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <TextBlock x:Name="MassFieldLabel" Text="Target Field" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <ComboBox x:Name="MassFieldCombo" Grid.Column="1" Height="34" DisplayMemberPath="Label" SelectedValuePath="Key"/>
+          <TextBlock x:Name="MassValueLabel" Grid.Column="2" Text="New Value" VerticalAlignment="Center" Margin="12,0,8,0"/>
+          <TextBox x:Name="MassValueBox" Grid.Column="3" Height="34"/>
+        </Grid>
+        <Grid Grid.Row="1" x:Name="GameplayReplacePanel" Visibility="Collapsed">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <TextBlock Text="Find Text" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBox x:Name="FindTextBox" Grid.Column="1" Height="34"/>
+          <TextBlock Grid.Column="2" Text="Replace With" VerticalAlignment="Center" Margin="12,0,8,0"/>
+          <TextBox x:Name="ReplaceTextBox" Grid.Column="3" Height="34"/>
+        </Grid>
+        <Grid Grid.Row="2">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="200"/><ColumnDefinition Width="200"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Margin="0,0,12,0"><TextBlock x:Name="AiTargetFieldsLabel" Text="AI Target Fields" Margin="0,0,0,6"/><ListBox x:Name="AiTargetFieldsList" Height="120" SelectionMode="Extended" DisplayMemberPath="Label"/></StackPanel>
+          <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock x:Name="AiProviderLabel" Text="Provider" Margin="0,0,0,6"/><ComboBox x:Name="AiProviderCombo" Height="34"/></StackPanel>
+          <StackPanel Grid.Column="2" Margin="0,0,12,0"><TextBlock x:Name="AiModelLabel" Text="Model" Margin="0,0,0,6"/><ComboBox x:Name="AiModelCombo" Height="34"/></StackPanel>
+          <StackPanel Grid.Column="3"><TextBlock x:Name="AiInstructionsLabel" Text="Instructions" Margin="0,0,0,6"/><TextBox x:Name="AiInstructionsBox" Height="120" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Code"/></StackPanel>
+        </Grid>
+      </Grid>
+    </Border>
+    <Border Grid.Row="3" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <TextBlock Text="Preview" FontWeight="SemiBold" Margin="0,0,0,10"/>
+        <DataGrid x:Name="PreviewGrid" Grid.Row="1" AutoGenerateColumns="True" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"/>
+      </Grid>
+    </Border>
+    <Border Grid.Row="4" Background="#FFFFFF" BorderBrush="#D7DEE9" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,12,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock x:Name="BatchStatusText" VerticalAlignment="Center" Foreground="#334155"/>
+        <Button x:Name="RunPreviewButton" Grid.Column="1" Content="Run Preview" Height="36" Margin="0,0,8,0"/>
+        <Button x:Name="ApplyButton" Grid.Column="2" Content="Apply Changes" Height="36" Margin="0,0,8,0"/>
+        <Button x:Name="CloseButton" Grid.Column="3" Content="Close" Height="36"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlNodeReader]::new($xaml)
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+    if ($script:MainWindow -and -not [object]::ReferenceEquals($window, $script:MainWindow)) {
+        $window.Owner = $script:MainWindow
+    }
+
+    $dialogControls = @{}
+    foreach ($name in @(
+            'OperationCombo', 'WorkspaceCombo', 'ModeCombo', 'RootCombo',
+            'TargetSearchBox', 'TargetList',
+            'ReferenceWorkspaceCombo', 'ReferenceModeCombo', 'ReferenceRootCombo', 'ReferenceSearchBox', 'ReferenceList',
+            'MassFieldLabel', 'MassFieldCombo', 'MassValueLabel', 'MassValueBox',
+            'GameplayReplacePanel', 'FindTextBox', 'ReplaceTextBox',
+            'AiTargetFieldsLabel', 'AiTargetFieldsList', 'AiProviderLabel', 'AiProviderCombo', 'AiModelLabel', 'AiModelCombo', 'AiInstructionsLabel', 'AiInstructionsBox',
+            'PreviewGrid', 'BatchStatusText', 'RunPreviewButton', 'ApplyButton', 'CloseButton'
+        )) {
+        $dialogControls[$name] = $window.FindName($name)
+    }
+
+    $dialogState = [ordered]@{
+        SuspendEvents = $false
+        PreviewRows   = @()
+        PreviewResults = @()
+    }
+
+    $setDialogStatus = {
+        param([string]$Text)
+        $dialogControls.BatchStatusText.Text = $Text
+    }.GetNewClosure()
+
+    $dialogControls.OperationCombo.Items.Add('Mass Replace') | Out-Null
+    $dialogControls.OperationCombo.Items.Add('AI Batch Generate') | Out-Null
+    $dialogControls.OperationCombo.SelectedIndex = 0
+    $dialogControls.ModeCombo.Items.Add('Gameplay Prompts') | Out-Null
+    $dialogControls.ModeCombo.Items.Add('Content Prompts') | Out-Null
+    $dialogControls.ModeCombo.SelectedItem = if ($InitialMode -eq 'Gameplay Prompts') { 'Gameplay Prompts' } else { 'Content Prompts' }
+    $dialogControls.ReferenceModeCombo.Items.Add('Gameplay Prompts') | Out-Null
+    $dialogControls.ReferenceModeCombo.Items.Add('Content Prompts') | Out-Null
+    $dialogControls.ReferenceModeCombo.SelectedItem = $dialogControls.ModeCombo.SelectedItem
+
+    foreach ($workspaceName in @(Get-BatchWorkspaceNames -Context $Context)) {
+        [void]$dialogControls.WorkspaceCombo.Items.Add($workspaceName)
+        [void]$dialogControls.ReferenceWorkspaceCombo.Items.Add($workspaceName)
+    }
+
+    $defaultWorkspace = if ($InitialWorkspace -and $dialogControls.WorkspaceCombo.Items.Contains($InitialWorkspace)) {
+        $InitialWorkspace
+    }
+    else {
+        [string]$dialogControls.WorkspaceCombo.Items[0]
+    }
+    $dialogControls.WorkspaceCombo.SelectedItem = $defaultWorkspace
+    $dialogControls.ReferenceWorkspaceCombo.SelectedItem = $defaultWorkspace
+
+    foreach ($providerKey in @($Context.Providers.Keys | Sort-Object)) {
+        [void]$dialogControls.AiProviderCombo.Items.Add($providerKey)
+    }
+    if ($InitialProvider -and $dialogControls.AiProviderCombo.Items.Contains($InitialProvider)) {
+        $dialogControls.AiProviderCombo.SelectedItem = $InitialProvider
+    }
+    elseif ($dialogControls.AiProviderCombo.Items.Count -gt 0) {
+        $dialogControls.AiProviderCombo.SelectedIndex = 0
+    }
+
+    $refreshAiModels = {
+        $selectedProviderValue = [string]$dialogControls.AiProviderCombo.SelectedItem
+        $currentModel = [string]$dialogControls.AiModelCombo.SelectedItem
+        $dialogState.SuspendEvents = $true
+        try {
+            $dialogControls.AiModelCombo.Items.Clear()
+            foreach ($modelKey in @(Get-ModelKeysForProvider -Context $Context -ProviderKey $selectedProviderValue)) {
+                [void]$dialogControls.AiModelCombo.Items.Add($modelKey)
+            }
+            if ($InitialModel -and $dialogControls.AiModelCombo.Items.Contains($InitialModel)) {
+                $dialogControls.AiModelCombo.SelectedItem = $InitialModel
+            }
+            elseif ($currentModel -and $dialogControls.AiModelCombo.Items.Contains($currentModel)) {
+                $dialogControls.AiModelCombo.SelectedItem = $currentModel
+            }
+            elseif ($dialogControls.AiModelCombo.Items.Count -gt 0) {
+                $dialogControls.AiModelCombo.SelectedIndex = 0
+            }
+        }
+        finally {
+            $dialogState.SuspendEvents = $false
+        }
+    }.GetNewClosure()
+
+    $refreshRoots = {
+        param($workspaceCombo, $modeCombo, $rootCombo)
+        $campaignName = [string]$workspaceCombo.SelectedItem
+        $modeName = [string]$modeCombo.SelectedItem
+        $currentName = if ($rootCombo.SelectedItem) { [string]$rootCombo.SelectedItem.Name } else { '' }
+        $options = @(Get-BatchRootOptions -Context $Context -Campaign $campaignName -Mode $modeName)
+        $dialogState.SuspendEvents = $true
+        try {
+            $rootCombo.ItemsSource = $null
+            $rootCombo.DisplayMemberPath = 'Name'
+            $rootCombo.ItemsSource = $options
+            if ($currentName) {
+                foreach ($option in @($options)) {
+                    if ($option.Name -eq $currentName) {
+                        $rootCombo.SelectedItem = $option
+                        break
+                    }
+                }
+            }
+            if (-not $rootCombo.SelectedItem -and $options.Count -gt 0) {
+                $rootCombo.SelectedIndex = 0
+            }
+        }
+        finally {
+            $dialogState.SuspendEvents = $false
+        }
+    }.GetNewClosure()
+
+    $refreshListItems = {
+        param($workspaceCombo, $modeCombo, $rootCombo, $searchBox, $listBox)
+        $rootOption = $rootCombo.SelectedItem
+        if (-not $rootOption) {
+            $listBox.ItemsSource = $null
+            return
+        }
+        $items = @(Get-BatchSelectableItems -Context $Context -Campaign ([string]$workspaceCombo.SelectedItem) -Mode ([string]$modeCombo.SelectedItem) -RootOption $rootOption -Search $searchBox.Text.Trim())
+        $listBox.ItemsSource = $null
+        $listBox.DisplayMemberPath = 'DisplayName'
+        $listBox.ItemsSource = $items
+    }.GetNewClosure()
+
+    $refreshFieldSelectors = {
+        $selectedTargets = @($dialogControls.TargetList.SelectedItems)
+        $isContentMode = ([string]$dialogControls.ModeCombo.SelectedItem -eq 'Content Prompts')
+        $isAiMode = ([string]$dialogControls.OperationCombo.SelectedItem -eq 'AI Batch Generate')
+        $fieldOptions = if ($isContentMode) { @(Get-BatchContentFieldOptions -Items $selectedTargets) } else { @() }
+
+        $dialogControls.MassFieldCombo.ItemsSource = $null
+        $dialogControls.AiTargetFieldsList.ItemsSource = $null
+        if ($isContentMode) {
+            $dialogControls.MassFieldCombo.ItemsSource = $fieldOptions
+            $dialogControls.AiTargetFieldsList.ItemsSource = $fieldOptions
+        }
+
+        $dialogControls.MassFieldLabel.Visibility = if ($isContentMode -and -not $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.MassFieldCombo.Visibility = if ($isContentMode -and -not $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.MassValueLabel.Visibility = if ($isContentMode -and -not $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.MassValueBox.Visibility = if ($isContentMode -and -not $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.GameplayReplacePanel.Visibility = if ((-not $isContentMode) -and (-not $isAiMode)) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.AiTargetFieldsLabel.Visibility = if ($isContentMode -and $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.AiTargetFieldsList.Visibility = if ($isContentMode -and $isAiMode) { 'Visible' } else { 'Collapsed' }
+        $aiVisibility = if ($isAiMode) { 'Visible' } else { 'Collapsed' }
+        $dialogControls.AiProviderLabel.Visibility = $aiVisibility
+        $dialogControls.AiProviderCombo.Visibility = $aiVisibility
+        $dialogControls.AiModelLabel.Visibility = $aiVisibility
+        $dialogControls.AiModelCombo.Visibility = $aiVisibility
+        $dialogControls.AiInstructionsLabel.Visibility = $aiVisibility
+        $dialogControls.AiInstructionsBox.Visibility = $aiVisibility
+    }.GetNewClosure()
+
+    $buildReferenceText = {
+        $selectedReferences = @($dialogControls.ReferenceList.SelectedItems)
+        return (Get-BatchReferenceContextText -Items $selectedReferences)
+    }.GetNewClosure()
+
+    $runPreview = {
+        $dialogState.PreviewRows = @()
+        $dialogState.PreviewResults = @()
+        $dialogControls.PreviewGrid.ItemsSource = $null
+
+        $selectedTargets = @($dialogControls.TargetList.SelectedItems)
+        if ($selectedTargets.Count -eq 0) {
+            throw 'Select at least one target entry or file.'
+        }
+
+        $operation = [string]$dialogControls.OperationCombo.SelectedItem
+        $workspaceName = [string]$dialogControls.WorkspaceCombo.SelectedItem
+        $modeName = [string]$dialogControls.ModeCombo.SelectedItem
+        $referenceText = $buildReferenceText.Invoke()
+        $previewRows = [System.Collections.Generic.List[object]]::new()
+        $previewResults = [System.Collections.Generic.List[object]]::new()
+
+        if ($operation -eq 'Mass Replace') {
+            if ($modeName -eq 'Content Prompts') {
+                $fieldName = [string]$dialogControls.MassFieldCombo.SelectedValue
+                if (-not $fieldName) {
+                    throw 'Select a target field.'
+                }
+                $newValue = [string]$dialogControls.MassValueBox.Text
+
+                foreach ($item in @($selectedTargets)) {
+                    $details = Get-BatchEntityDocumentDetails -Item $item
+                    if (-not $details -or -not $details.Document -or -not $details.Document.CanRoundTripStructured -or -not $details.Document.Fields.Contains($fieldName)) {
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Skipped'; Target = $fieldName; CurrentValue = ''; NewValue = '' }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{ CanApply = $false }) | Out-Null
+                        continue
+                    }
+
+                    $previewRows.Add([pscustomobject]@{
+                            Item         = $item.DisplayName
+                            Status       = 'Ready'
+                            Target       = $fieldName
+                            CurrentValue = [string]$details.Document.Fields[$fieldName]
+                            NewValue     = $newValue
+                        }) | Out-Null
+                    $previewResults.Add([pscustomobject]@{
+                            CanApply   = $true
+                            ActionType = 'ContentFieldUpdate'
+                            Campaign   = $workspaceName
+                            Mode       = $modeName
+                            Item       = $item
+                            Path       = $item.EntryFiles.EntityPath
+                            FieldValues = @{ $fieldName = $newValue }
+                        }) | Out-Null
+                }
+            }
+            else {
+                $findText = [string]$dialogControls.FindTextBox.Text
+                if (-not $findText) {
+                    throw 'Enter the text to replace.'
+                }
+                $replaceText = [string]$dialogControls.ReplaceTextBox.Text
+
+                foreach ($item in @($selectedTargets)) {
+                    $fileProfile = Read-TextFileDetailed -Path $item.Path
+                    $newContent = $fileProfile.Content.Replace($findText, $replaceText)
+                    $status = if ($newContent -eq $fileProfile.Content) { 'No Change' } else { 'Ready' }
+                    $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = $status; Target = 'File Text'; CurrentValue = $fileProfile.Content; NewValue = $newContent }) | Out-Null
+                    $previewResults.Add([pscustomobject]@{
+                            CanApply   = ($status -eq 'Ready')
+                            ActionType = 'GameplayTextUpdate'
+                            Campaign   = $workspaceName
+                            Mode       = $modeName
+                            Item       = $item
+                            Path       = $item.Path
+                            NewContent = $newContent
+                        }) | Out-Null
+                }
+            }
+        }
+        else {
+            $modelKey = [string]$dialogControls.AiModelCombo.SelectedItem
+            if (-not $modelKey) {
+                throw 'Select an AI model.'
+            }
+            $instructions = $dialogControls.AiInstructionsBox.Text.Trim()
+            if (-not $instructions) {
+                $instructions = 'Generate content that stays consistent with Sentient Sands and Kenshi.'
+            }
+
+            if ($modeName -eq 'Content Prompts') {
+                $targetFieldItems = @($dialogControls.AiTargetFieldsList.SelectedItems)
+                if ($targetFieldItems.Count -eq 0) {
+                    throw 'Select at least one target field for AI generation.'
+                }
+
+                $fieldNames = @($targetFieldItems | ForEach-Object { [string]$_.Key })
+                foreach ($item in @($selectedTargets)) {
+                    $details = Get-BatchEntityDocumentDetails -Item $item
+                    if (-not $details -or -not $details.Document -or -not $details.Document.CanRoundTripStructured) {
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Skipped'; Target = ($fieldNames -join ', '); CurrentValue = ''; NewValue = '' }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{ CanApply = $false }) | Out-Null
+                        continue
+                    }
+
+                    $missingFields = @($fieldNames | Where-Object { -not $details.Document.Fields.Contains($_) })
+                    if ($missingFields.Count -gt 0) {
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Skipped'; Target = ($fieldNames -join ', '); CurrentValue = ''; NewValue = 'Missing fields: ' + ($missingFields -join ', ') }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{ CanApply = $false }) | Out-Null
+                        continue
+                    }
+
+                    try {
+                        $generatedFields = Invoke-BatchEntityFieldGeneration -Context $Context -ModelKey $modelKey -Item $item -Document $details.Document -TargetFields $fieldNames -ReferenceText $referenceText -UserInstructions $instructions
+                        $currentSummary = Format-BatchFieldSummary -Document $details.Document -FieldNames $fieldNames
+                        $tempDocument = [pscustomobject]@{ Fields = @{}; FieldMeta = $details.Document.FieldMeta }
+                        foreach ($fieldName in @($fieldNames)) {
+                            $tempDocument.Fields[$fieldName] = [string]$generatedFields[$fieldName]
+                        }
+                        $previewRows.Add([pscustomobject]@{
+                                Item         = $item.DisplayName
+                                Status       = 'Ready'
+                                Target       = ($fieldNames -join ', ')
+                                CurrentValue = $currentSummary
+                                NewValue     = (Format-BatchFieldSummary -Document $tempDocument -FieldNames $fieldNames)
+                            }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{
+                                CanApply   = $true
+                                ActionType = 'ContentFieldUpdate'
+                                Campaign   = $workspaceName
+                                Mode       = $modeName
+                                Item       = $item
+                                Path       = $item.EntryFiles.EntityPath
+                                FieldValues = $generatedFields
+                            }) | Out-Null
+                    }
+                    catch {
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Failed'; Target = ($fieldNames -join ', '); CurrentValue = ''; NewValue = $_.Exception.Message }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{ CanApply = $false }) | Out-Null
+                    }
+                }
+            }
+            else {
+                foreach ($item in @($selectedTargets)) {
+                    try {
+                        $currentText = (Read-TextFileDetailed -Path $item.Path).Content
+                        $newContent = Invoke-BatchGameplayFileGeneration -Context $Context -ModelKey $modelKey -Item $item -CurrentText $currentText -ReferenceText $referenceText -UserInstructions $instructions
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Ready'; Target = 'File Text'; CurrentValue = $currentText; NewValue = $newContent }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{
+                                CanApply   = $true
+                                ActionType = 'GameplayTextUpdate'
+                                Campaign   = $workspaceName
+                                Mode       = $modeName
+                                Item       = $item
+                                Path       = $item.Path
+                                NewContent = $newContent
+                            }) | Out-Null
+                    }
+                    catch {
+                        $previewRows.Add([pscustomobject]@{ Item = $item.DisplayName; Status = 'Failed'; Target = 'File Text'; CurrentValue = ''; NewValue = $_.Exception.Message }) | Out-Null
+                        $previewResults.Add([pscustomobject]@{ CanApply = $false }) | Out-Null
+                    }
+                }
+            }
+        }
+
+        $dialogState.PreviewRows = @($previewRows)
+        $dialogState.PreviewResults = @($previewResults)
+        $dialogControls.PreviewGrid.ItemsSource = $dialogState.PreviewRows
+        $readyCount = @($dialogState.PreviewResults | Where-Object { $_.CanApply }).Count
+        $setDialogStatus.Invoke("Preview complete. $readyCount item(s) ready to apply.")
+    }.GetNewClosure()
+
+    $refreshTargetRootsAndItems = {
+        $refreshRoots.Invoke($dialogControls.WorkspaceCombo, $dialogControls.ModeCombo, $dialogControls.RootCombo)
+        $refreshListItems.Invoke($dialogControls.WorkspaceCombo, $dialogControls.ModeCombo, $dialogControls.RootCombo, $dialogControls.TargetSearchBox, $dialogControls.TargetList)
+        $refreshFieldSelectors.Invoke()
+    }.GetNewClosure()
+
+    $refreshReferenceRootsAndItems = {
+        $refreshRoots.Invoke($dialogControls.ReferenceWorkspaceCombo, $dialogControls.ReferenceModeCombo, $dialogControls.ReferenceRootCombo)
+        $refreshListItems.Invoke($dialogControls.ReferenceWorkspaceCombo, $dialogControls.ReferenceModeCombo, $dialogControls.ReferenceRootCombo, $dialogControls.ReferenceSearchBox, $dialogControls.ReferenceList)
+    }.GetNewClosure()
+
+    $refreshTargetRootsAndItems.Invoke()
+    $refreshReferenceRootsAndItems.Invoke()
+    $refreshAiModels.Invoke()
+    $refreshFieldSelectors.Invoke()
+    $setDialogStatus.Invoke('Ready.')
+
+    $dialogControls.WorkspaceCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshTargetRootsAndItems.Invoke() } }.GetNewClosure())
+    $dialogControls.ModeCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshTargetRootsAndItems.Invoke() } }.GetNewClosure())
+    $dialogControls.RootCombo.Add_SelectionChanged({
+        if ($dialogState.SuspendEvents) { return }
+        $refreshListItems.Invoke($dialogControls.WorkspaceCombo, $dialogControls.ModeCombo, $dialogControls.RootCombo, $dialogControls.TargetSearchBox, $dialogControls.TargetList)
+        $refreshFieldSelectors.Invoke()
+    }.GetNewClosure())
+    $dialogControls.TargetSearchBox.Add_TextChanged({
+        if ($dialogState.SuspendEvents) { return }
+        $refreshListItems.Invoke($dialogControls.WorkspaceCombo, $dialogControls.ModeCombo, $dialogControls.RootCombo, $dialogControls.TargetSearchBox, $dialogControls.TargetList)
+        $refreshFieldSelectors.Invoke()
+    }.GetNewClosure())
+    $dialogControls.TargetList.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshFieldSelectors.Invoke() } }.GetNewClosure())
+    $dialogControls.ReferenceWorkspaceCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshReferenceRootsAndItems.Invoke() } }.GetNewClosure())
+    $dialogControls.ReferenceModeCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshReferenceRootsAndItems.Invoke() } }.GetNewClosure())
+    $dialogControls.ReferenceRootCombo.Add_SelectionChanged({
+        if ($dialogState.SuspendEvents) { return }
+        $refreshListItems.Invoke($dialogControls.ReferenceWorkspaceCombo, $dialogControls.ReferenceModeCombo, $dialogControls.ReferenceRootCombo, $dialogControls.ReferenceSearchBox, $dialogControls.ReferenceList)
+    }.GetNewClosure())
+    $dialogControls.ReferenceSearchBox.Add_TextChanged({
+        if ($dialogState.SuspendEvents) { return }
+        $refreshListItems.Invoke($dialogControls.ReferenceWorkspaceCombo, $dialogControls.ReferenceModeCombo, $dialogControls.ReferenceRootCombo, $dialogControls.ReferenceSearchBox, $dialogControls.ReferenceList)
+    }.GetNewClosure())
+    $dialogControls.OperationCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshFieldSelectors.Invoke() } }.GetNewClosure())
+    $dialogControls.AiProviderCombo.Add_SelectionChanged({ if (-not $dialogState.SuspendEvents) { $refreshAiModels.Invoke() } }.GetNewClosure())
+
+    $dialogControls.RunPreviewButton.Add_Click({
+        try {
+            $setDialogStatus.Invoke('Running preview...')
+            $runPreview.Invoke()
+        }
+        catch {
+            $setDialogStatus.Invoke('Preview failed: ' + $_.Exception.Message)
+            Show-Message -Message $_.Exception.Message -Icon Error | Out-Null
+        }
+    }.GetNewClosure())
+    $dialogControls.ApplyButton.Add_Click({
+        try {
+            if (@($dialogState.PreviewResults | Where-Object { $_.CanApply }).Count -eq 0) {
+                Show-Message -Message 'Run a preview first, and make sure at least one item is ready to apply.' -Icon Warning | Out-Null
+                return
+            }
+            $setDialogStatus.Invoke('Applying changes...')
+            $applySummary = Apply-BatchPreviewResults -Results $dialogState.PreviewResults
+            $setDialogStatus.Invoke("Applied $($applySummary.Applied) change(s). Failed: $($applySummary.Failed).")
+        }
+        catch {
+            $setDialogStatus.Invoke('Apply failed: ' + $_.Exception.Message)
+            Show-Message -Message $_.Exception.Message -Icon Error | Out-Null
+        }
+    }.GetNewClosure())
+    $dialogControls.CloseButton.Add_Click({ $window.Close() })
+
+    [void]$window.ShowDialog()
+}
+
 function Show-TemplatePickerDialog {
     param(
         [Parameter(Mandatory)]$Context,
@@ -1914,6 +2998,7 @@ if ($SelfTest) {
         <WrapPanel Grid.Row="2" HorizontalAlignment="Right">
           <Button x:Name="NewButton" Content="New" Height="36"/>
           <Button x:Name="CreateFromTemplateButton" Content="From Template" Height="36"/>
+          <Button x:Name="BatchToolsButton" Content="Batch Tools" Height="36"/>
           <Button x:Name="DeleteButton" Content="Delete" Height="36"/>
           <Button x:Name="SaveButton" Content="Save" Height="36"/>
           <Button x:Name="SaveAsButton" Content="Save As" Height="36"/>
@@ -2027,13 +3112,14 @@ if ($SelfTest) {
 
 $reader = [System.Xml.XmlNodeReader]::new($MainXaml)
 $Window = [Windows.Markup.XamlReader]::Load($reader)
+$script:MainWindow = $Window
 
 $Controls = @{}
 foreach ($name in @(
         'RootPathBox', 'OpenFolderButton', 'ImportZipButton', 'CampaignCombo', 'ModeCombo', 'ProviderCombo', 'ModelCombo', 'SearchBox',
         'NewCategoryLabel', 'NewCategoryCombo',
         'ExpandAllButton', 'CollapseAllButton',
-        'NewButton', 'CreateFromTemplateButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
+        'NewButton', 'CreateFromTemplateButton', 'BatchToolsButton', 'DeleteButton', 'SaveButton', 'SaveAsButton', 'GenerateButton', 'ApplyDraftButton', 'PromptTree',
         'EditorHeaderText', 'MandatoryEditor', 'ContentTabs', 'EntityTab', 'DialogueTab', 'StatsTab', 'StructuredEditorScroll', 'StructuredEditorPanel', 'RawEntityEditor', 'DialogueEditor', 'StatsEditor',
         'EmptyStateText', 'MetadataText', 'PreviewTextBox', 'ReferenceTextBox', 'TemplateReferenceCheckBox',
         'AiInstructionsBox', 'AiDraftTextBox', 'StatusText'
@@ -3652,6 +4738,15 @@ $Controls.CreateFromTemplateButton.Add_Click({
         if ($selection) {
             Copy-TemplateItemToWorkspace -Selection $selection
         }
+    }
+})
+
+$Controls.BatchToolsButton.Add_Click({
+    Invoke-UiAction -Context 'Batch tools' -Action {
+        if (-not $script:State.ModContext) {
+            return
+        }
+        Show-BatchToolsDialog -Context $script:State.ModContext -InitialWorkspace $script:State.CurrentCampaign -InitialMode $script:State.CurrentMode -InitialProvider ([string]$Controls.ProviderCombo.SelectedItem) -InitialModel ([string]$Controls.ModelCombo.SelectedItem)
     }
 })
 

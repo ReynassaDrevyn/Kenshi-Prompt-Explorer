@@ -286,6 +286,12 @@ This project is an external editor for Sentient Sands data. It is not Kenshi its
 
 ## Changelog
 
+v1.6
+
+- new function: Batch tools
+- mass edit/replace specific entries
+- ai generation: mass generate entries for entities
+
 v1.5
 
 - updated for SentientSands-v0.32
